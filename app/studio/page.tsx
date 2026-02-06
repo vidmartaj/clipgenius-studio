@@ -31,6 +31,9 @@ export default function StudioPage() {
   const [editedPreviewOn, setEditedPreviewOn] = useState(false);
 
   const [exportSettings, setExportSettings] = useState<ExportSettings>(DEFAULT_EXPORT);
+  const [isExporting, setIsExporting] = useState(false);
+  const [exportUrl, setExportUrl] = useState<string | null>(null);
+  const [exportError, setExportError] = useState<string | null>(null);
 
   const [chatInput, setChatInput] = useState("");
   const [chat, setChat] = useState<Array<{ role: "ai" | "user"; text: string }>>([
@@ -258,6 +261,32 @@ export default function StudioPage() {
     }
   }
 
+  async function onExport() {
+    if (!timeline || !videoUrl) return;
+    setIsExporting(true);
+    setExportError(null);
+    setExportUrl(null);
+    try {
+      const res = await fetch("/api/export", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          videoUrl,
+          timeline,
+          resolution: exportSettings.resolution,
+          format: exportSettings.format
+        })
+      });
+      if (!res.ok) throw new Error(await res.text());
+      const data = (await res.json()) as { exportUrl: string };
+      setExportUrl(data.exportUrl);
+    } catch (e: any) {
+      setExportError(e?.message ?? "Export failed");
+    } finally {
+      setIsExporting(false);
+    }
+  }
+
   return (
     <main className="studio">
       <header className="studioTop">
@@ -460,11 +489,23 @@ export default function StudioPage() {
                 </select>
               </label>
 
-              <button className="btn primary full" type="button" disabled>
-                Export Video
+              <button
+                className="btn primary full"
+                type="button"
+                onClick={onExport}
+                disabled={!timeline || !videoUrl || isExporting}
+              >
+                {isExporting ? "Rendering…" : "Export Video"}
               </button>
 
-              <div className="hint">Export rendering comes next (FFmpeg backend).</div>
+              {exportError ? <div className="hint" style={{ color: "rgba(255, 162, 162, .9)" }}>{exportError}</div> : null}
+              {exportUrl ? (
+                <a className="hint" href={exportUrl} target="_blank" rel="noopener">
+                  Download export
+                </a>
+              ) : (
+                <div className="hint">Exports cut &amp; stitch your timeline using FFmpeg.</div>
+              )}
             </div>
           </section>
         </aside>

@@ -15,3 +15,5 @@ pnpm-debug.log*
 public/uploads/*
 !public/uploads/.gitkeep
 
+public/exports/*
+!public/exports/.gitkeep

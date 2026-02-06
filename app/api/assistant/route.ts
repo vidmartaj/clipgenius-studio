@@ -17,6 +17,7 @@ export async function POST(req: Request) {
   if (message.includes("shorter") || message.includes("cut it down") || message.includes("make it shorter")) {
     reply.reply =
       "Done — I trimmed the draft to a tighter cut. Want it even shorter, or should I keep more context at the start?";
+    reply.operations = reply.operations ?? [];
     reply.operations.push({ op: "trim_to_target_seconds", targetSeconds: 60 });
   } else if (message.includes("fast") || message.includes("fast-paced") || message.includes("faster")) {
     reply.reply =
@@ -31,4 +32,3 @@ export async function POST(req: Request) {
 
   return NextResponse.json(reply);
 }
-
