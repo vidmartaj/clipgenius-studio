@@ -1,0 +1,17 @@
+node_modules
+.next
+out
+dist
+.DS_Store
+.env
+.env.local
+.env.*.local
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# MVP-only uploads folder is versioned with .gitkeep, but ignore the actual files
+public/uploads/*
+!public/uploads/.gitkeep
+
