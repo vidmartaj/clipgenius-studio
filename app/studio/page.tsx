@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useMemo, useRef, useState } from "react";
+import type { MutableRefObject } from "react";
 import type { AssistantReply, Timeline, TimelineClip } from "../../lib/types";
 import { splitClipAt, trimTimelineToTargetSeconds } from "../../lib/timeline";
 
@@ -11,6 +12,13 @@ type ExportSettings = {
 
 const DEFAULT_EXPORT: ExportSettings = { resolution: "720p", format: "MP4" };
 
+type Asset = {
+  id: string;
+  name: string;
+  videoUrl: string;
+  timeline: Timeline | null;
+};
+
 type HistoryState = {
   timeline: Timeline | null;
   selectedClipId: string | null;
@@ -19,6 +27,7 @@ type HistoryState = {
 export default function StudioPage() {
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
+  const stripRef = useRef<HTMLDivElement | null>(null);
   const previewStateRef = useRef<{
     enabled: boolean;
     mode: "sequence" | "single";
@@ -26,22 +35,39 @@ export default function StudioPage() {
     singleEnd: number | null;
   }>({ enabled: false, mode: "sequence", idx: 0, singleEnd: null });
 
-  const [projectId, setProjectId] = useState<string | null>(null);
-  const [videoUrl, setVideoUrl] = useState<string | null>(null);
+  const [assets, setAssets] = useState<Asset[]>([]);
+  const [activeAssetId, setActiveAssetId] = useState<string | null>(null);
   const [isUploading, setIsUploading] = useState(false);
   const [uploadError, setUploadError] = useState<string | null>(null);
 
-  const [timeline, setTimeline] = useState<Timeline | null>(null);
   const [selectedClipId, setSelectedClipId] = useState<string | null>(null);
   const [editedPreviewOn, setEditedPreviewOn] = useState(false);
 
   const [past, setPast] = useState<HistoryState[]>([]);
   const [future, setFuture] = useState<HistoryState[]>([]);
+  const dragRef = useRef<null | {
+    clipId: string;
+    handle: "in" | "out";
+    startX: number;
+    start: number;
+    end: number;
+    prevState: HistoryState;
+    didMove: boolean;
+  }>(null);
 
   const [exportSettings, setExportSettings] = useState<ExportSettings>(DEFAULT_EXPORT);
   const [isExporting, setIsExporting] = useState(false);
   const [exportUrl, setExportUrl] = useState<string | null>(null);
   const [exportError, setExportError] = useState<string | null>(null);
+
+  const activeAsset = useMemo(() => {
+    if (!activeAssetId) return null;
+    return assets.find((a) => a.id === activeAssetId) ?? null;
+  }, [assets, activeAssetId]);
+
+  const projectId = activeAsset?.id ?? null;
+  const videoUrl = activeAsset?.videoUrl ?? null;
+  const timeline = activeAsset?.timeline ?? null;
 
   const [chatInput, setChatInput] = useState("");
   const [chat, setChat] = useState<Array<{ role: "ai" | "user"; text: string }>>([
@@ -66,19 +92,9 @@ export default function StudioPage() {
     }
   }, [timeline, selectedClipId]);
 
-  function commit(next: HistoryState) {
-    // Commit changes with undo/redo support.
-    setPast((p) => {
-      const cur: HistoryState = { timeline, selectedClipId };
-      const nextPast = [...p, cur].slice(-50);
-      return nextPast;
-    });
-    setFuture([]);
-    setTimeline(next.timeline);
-    setSelectedClipId(next.selectedClipId);
-    stopEditedPreview();
-    setExportUrl(null);
-    setExportError(null);
+  function setActiveTimeline(nextTimeline: Timeline | null) {
+    if (!activeAssetId) return;
+    setAssets((prev) => prev.map((a) => (a.id === activeAssetId ? { ...a, timeline: nextTimeline } : a)));
   }
 
   function undo() {
@@ -86,7 +102,7 @@ export default function StudioPage() {
       if (p.length === 0) return p;
       const prev = p[p.length - 1];
       setFuture((f) => [{ timeline, selectedClipId }, ...f].slice(0, 50));
-      setTimeline(prev.timeline);
+      setActiveTimeline(prev.timeline);
       setSelectedClipId(prev.selectedClipId);
       stopEditedPreview();
       setExportUrl(null);
@@ -100,7 +116,7 @@ export default function StudioPage() {
       if (f.length === 0) return f;
       const next = f[0];
       setPast((p) => [...p, { timeline, selectedClipId }].slice(-50));
-      setTimeline(next.timeline);
+      setActiveTimeline(next.timeline);
       setSelectedClipId(next.selectedClipId);
       stopEditedPreview();
       setExportUrl(null);
@@ -129,14 +145,22 @@ export default function StudioPage() {
     return () => window.removeEventListener("keydown", onKeyDown);
   }, [timeline, selectedClipId]);
 
+  function applyWithHistory(next: HistoryState) {
+    setPast((p) => [...p, { timeline, selectedClipId }].slice(-50));
+    setFuture([]);
+    setActiveTimeline(next.timeline);
+    setSelectedClipId(next.selectedClipId);
+    stopEditedPreview();
+    setExportUrl(null);
+    setExportError(null);
+  }
+
   async function onPickFile(file?: File) {
     if (!file) return;
     setIsUploading(true);
     setUploadError(null);
     setExportUrl(null);
     setExportError(null);
-    setPast([]);
-    setFuture([]);
 
     try {
       const fd = new FormData();
@@ -149,31 +173,20 @@ export default function StudioPage() {
         timeline?: Timeline | null;
       };
 
-      setProjectId(data.projectId);
-      setVideoUrl(data.videoUrl);
+      const asset: Asset = {
+        id: data.projectId,
+        name: file.name || "Untitled",
+        videoUrl: data.videoUrl,
+        timeline: data.timeline && data.timeline.clips?.length ? data.timeline : null
+      };
+      setAssets((prev) => [...prev, asset]);
+      setActiveAssetId(asset.id);
+      setSelectedClipId(asset.timeline?.clips?.[0]?.id ?? null);
+      setPast([]);
+      setFuture([]);
       stopEditedPreview();
 
-      if (data.timeline && data.timeline.clips?.length) {
-        setTimeline(data.timeline);
-        setSelectedClipId(data.timeline.clips[0].id);
-      } else {
-        // Fallback timeline: one clip spanning the full duration (updated again after video metadata loads).
-        const initialTimeline: Timeline = {
-          projectId: data.projectId,
-          durationSeconds: 0,
-          clips: [
-            {
-              id: crypto.randomUUID(),
-              label: "Full Clip",
-              start: 0,
-              end: 1,
-              kind: "source"
-            }
-          ]
-        };
-        setTimeline(initialTimeline);
-        setSelectedClipId(initialTimeline.clips[0].id);
-      }
+      // If upload returned no timeline, we'll build a simple placeholder after metadata loads.
 
       setChat((prev) => [
         ...prev,
@@ -188,21 +201,29 @@ export default function StudioPage() {
 
   function onLoadedMetadata() {
     const v = videoRef.current;
-    if (!v || !timeline) return;
-    const durationSeconds = Number.isFinite(v.duration) ? v.duration : timeline.durationSeconds;
+    if (!v || !activeAssetId) return;
+    const durationSeconds = Number.isFinite(v.duration) ? v.duration : 0;
     if (!Number.isFinite(durationSeconds) || durationSeconds <= 0) return;
 
-    setTimeline((t) => {
-      if (!t) return t;
-      const prevDuration = t.durationSeconds;
-      if (Math.abs(prevDuration - durationSeconds) < 0.01) return t;
-      // If we only have a single "full clip" placeholder, expand it to the true duration.
-      const clips =
-        t.clips.length === 1
-          ? t.clips.map((c) => ({ ...c, start: 0, end: durationSeconds, label: c.label === "Full Clip" ? "Full Clip" : c.label }))
-          : t.clips;
-      return { ...t, durationSeconds, clips };
-    });
+    setAssets((prev) =>
+      prev.map((a) => {
+        if (a.id !== activeAssetId) return a;
+        const t = a.timeline;
+        if (!t || !t.clips?.length) {
+          const placeholder: Timeline = {
+            projectId: a.id,
+            durationSeconds,
+            clips: [
+              { id: crypto.randomUUID(), label: "Full Clip", kind: "source", start: 0, end: durationSeconds }
+            ]
+          };
+          return { ...a, timeline: placeholder };
+        }
+        const prevDuration = t.durationSeconds;
+        if (Math.abs(prevDuration - durationSeconds) < 0.01) return a;
+        return { ...a, timeline: { ...t, durationSeconds } };
+      })
+    );
   }
 
   function seekTo(seconds: number) {
@@ -293,17 +314,17 @@ export default function StudioPage() {
     const t = v.currentTime || 0;
     const next = splitClipAt(timeline, selectedClip.id, t);
     if (!next) return;
-    commit({ timeline: next.timeline, selectedClipId: next.newSelectedId });
+    applyWithHistory({ timeline: next.timeline, selectedClipId: next.newSelectedId });
   }
 
   function onDeleteClip() {
     if (!timeline || !selectedClip) return;
     const remaining = timeline.clips.filter((c) => c.id !== selectedClip.id);
     if (remaining.length === 0) return;
-    commit({ timeline: { ...timeline, clips: remaining }, selectedClipId: remaining[0].id });
+    applyWithHistory({ timeline: { ...timeline, clips: remaining }, selectedClipId: remaining[0].id });
   }
 
-  function updateSelectedClip(patch: Partial<Pick<TimelineClip, "start" | "end" | "label">>) {
+  function updateSelectedClip(patch: Partial<Pick<TimelineClip, "start" | "end" | "label">>, opts?: { history?: boolean }) {
     if (!timeline || !selectedClip) return;
     const minLen = 0.2;
     let start = patch.start ?? selectedClip.start;
@@ -321,19 +342,24 @@ export default function StudioPage() {
     const nextClips = timeline.clips.map((c) =>
       c.id === selectedClip.id ? { ...c, ...patch, start, end } : c
     );
-    commit({ timeline: { ...timeline, clips: nextClips }, selectedClipId });
+    const nextTimeline = { ...timeline, clips: nextClips };
+    if (opts?.history === false) {
+      setActiveTimeline(nextTimeline);
+    } else {
+      applyWithHistory({ timeline: nextTimeline, selectedClipId });
+    }
   }
 
   function setInToPlayhead() {
     const v = videoRef.current;
     if (!v || !selectedClip) return;
-    updateSelectedClip({ start: clamp(v.currentTime, 0, selectedClip.end - 0.2) });
+    updateSelectedClip({ start: clamp(v.currentTime, 0, selectedClip.end - 0.2) }, { history: true });
   }
 
   function setOutToPlayhead() {
     const v = videoRef.current;
     if (!v || !selectedClip) return;
-    updateSelectedClip({ end: clamp(v.currentTime, selectedClip.start + 0.2, totalDuration) });
+    updateSelectedClip({ end: clamp(v.currentTime, selectedClip.start + 0.2, totalDuration) }, { history: true });
   }
 
   async function sendToAssistant(text: string) {
@@ -364,7 +390,7 @@ export default function StudioPage() {
           t = trimTimelineToTargetSeconds(t, op.targetSeconds);
         }
       }
-      commit({ timeline: t, selectedClipId: t.clips[0]?.id ?? null });
+      applyWithHistory({ timeline: t, selectedClipId: t.clips[0]?.id ?? null });
     }
   }
 
@@ -400,8 +426,12 @@ export default function StudioPage() {
         <div className="filePill">
           <span className={`statusDot ${videoUrl ? "on" : ""}`} aria-hidden="true" />
           <div>
-            <div className="fileTitle">{videoUrl ? "File loaded" : "No file loaded"}</div>
-            <div className="fileSub">{videoUrl ? "Ready to edit" : "Upload a clip to start"}</div>
+            <div className="fileTitle">
+              {activeAsset ? activeAsset.name : (videoUrl ? "File loaded" : "No file loaded")}
+            </div>
+            <div className="fileSub">
+              {videoUrl ? "Ready to edit" : "Upload clips to start"}
+            </div>
           </div>
         </div>
 
@@ -418,10 +448,12 @@ export default function StudioPage() {
           <button
             className="btn ghost"
             onClick={() => {
-              setProjectId(null);
-              setVideoUrl(null);
-              setTimeline(null);
-              setSelectedClipId(null);
+              if (!activeAssetId) return;
+              const remaining = assets.filter((a) => a.id !== activeAssetId);
+              setAssets(remaining);
+              const nextActive = remaining[0]?.id ?? null;
+              setActiveAssetId(nextActive);
+              setSelectedClipId(remaining[0]?.timeline?.clips?.[0]?.id ?? null);
               stopEditedPreview();
               setPast([]);
               setFuture([]);
@@ -458,25 +490,30 @@ export default function StudioPage() {
           <div className="sideBin">
             <div className="sideBinHead">
               <div className="sideBinTitle">Clips</div>
-              <div className="sideBinMeta">{timeline ? `${timeline.clips.length}` : "—"}</div>
+              <div className="sideBinMeta">{assets.length ? `${assets.length}` : "—"}</div>
             </div>
             <div className="sideBinBody">
-              {(timeline?.clips ?? []).slice(0, 6).map((c) => (
+              {assets.map((a) => (
                 <button
-                  key={c.id}
+                  key={a.id}
                   type="button"
-                  className={`binClip ${c.id === selectedClipId ? "isSelected" : ""}`}
+                  className={`binClip ${a.id === activeAssetId ? "isSelected" : ""}`}
                   onClick={() => {
-                    setSelectedClipId(c.id);
-                    playClipPreview(c);
+                    setActiveAssetId(a.id);
+                    setSelectedClipId(a.timeline?.clips?.[0]?.id ?? null);
+                    setPast([]);
+                    setFuture([]);
+                    stopEditedPreview();
+                    setExportUrl(null);
+                    setExportError(null);
                   }}
-                  title={c.label}
+                  title={a.name}
                 >
-                  <div className="binClipTitle">{c.label}</div>
-                  <div className="binClipSub">{fmt(c.start)}–{fmt(c.end)}</div>
+                  <div className="binClipTitle">{a.name}</div>
+                  <div className="binClipSub">{a.timeline ? `${fmt(a.timeline.durationSeconds)} · ${a.timeline.clips.length} clips` : "Processing…"}</div>
                 </button>
               ))}
-              {!timeline ? <div className="binEmpty">Upload a video to populate your timeline.</div> : null}
+              {assets.length === 0 ? <div className="binEmpty">Upload clips to populate your library.</div> : null}
             </div>
           </div>
         </aside>
@@ -537,47 +574,10 @@ export default function StudioPage() {
                 Captions
               </button>
               <div className="toolHint">
-                Tip: switch to “Edited”, then hit Play. Set In/Out trims the selected clip.
+                Tip: hit Preview. Drag the clip edges in the bottom timeline to trim.
               </div>
             </div>
 
-            {selectedClip ? (
-              <div className="trimRow" aria-label="Trim values">
-                <div className="trimField">
-                  <label htmlFor="clipStart">In</label>
-                  <input
-                    id="clipStart"
-                    type="number"
-                    inputMode="decimal"
-                    min={0}
-                    max={Math.max(0, totalDuration)}
-                    step={0.1}
-                    value={Number.isFinite(selectedClip.start) ? Number(selectedClip.start.toFixed(1)) : 0}
-                    onChange={(e) => updateSelectedClip({ start: Number(e.target.value) })}
-                  />
-                  <span className="trimHint">{fmt(selectedClip.start)}</span>
-                </div>
-                <div className="trimField">
-                  <label htmlFor="clipEnd">Out</label>
-                  <input
-                    id="clipEnd"
-                    type="number"
-                    inputMode="decimal"
-                    min={0}
-                    max={Math.max(0, totalDuration)}
-                    step={0.1}
-                    value={Number.isFinite(selectedClip.end) ? Number(selectedClip.end.toFixed(1)) : 0}
-                    onChange={(e) => updateSelectedClip({ end: Number(e.target.value) })}
-                  />
-                  <span className="trimHint">{fmt(selectedClip.end)}</span>
-                </div>
-                <div className="trimField grow">
-                  <div className="trimMeta">
-                    <span className="mono">Clip length: {fmt(Math.max(0, selectedClip.end - selectedClip.start))}</span>
-                  </div>
-                </div>
-              </div>
-            ) : null}
           </section>
 
           <section className="timelineCard" aria-label="AI Timeline">
@@ -591,26 +591,63 @@ export default function StudioPage() {
               </div>
             </div>
 
-            <div className="timelineTrack" role="list">
-              {(timeline?.clips ?? []).map((clip) => (
-                <button
-                  key={clip.id}
-                  type="button"
-                  className={`clip ${clip.id === selectedClipId ? "isSelected" : ""}`}
-                  onClick={() => {
-                    setSelectedClipId(clip.id);
-                    playClipPreview(clip);
-                  }}
-                  role="listitem"
-                  title={`${clip.label} (${fmt(clip.start)}–${fmt(clip.end)})`}
-                >
-                  <div className="clipLabel">{clip.label}</div>
-                  <div className="clipSub">{fmt(clip.start)}–{fmt(clip.end)}</div>
-                </button>
-              ))}
+            <TimelineStrip
+              refEl={stripRef}
+              timeline={timeline}
+              selectedClipId={selectedClipId}
+              onSelect={(id) => {
+                setSelectedClipId(id);
+                const clip = timeline?.clips.find((c) => c.id === id);
+                if (clip) playClipPreview(clip);
+              }}
+              videoRef={videoRef}
+              onBeginDrag={(clipId, handle, startX) => {
+                const clip = timeline?.clips.find((c) => c.id === clipId);
+                if (!clip) return;
+                dragRef.current = {
+                  clipId,
+                  handle,
+                  startX,
+                  start: clip.start,
+                  end: clip.end,
+                  prevState: { timeline, selectedClipId },
+                  didMove: false
+                };
+              }}
+              onDrag={(clientX) => {
+                const d = dragRef.current;
+                const t = timeline;
+                const el = stripRef.current;
+                if (!d || !t || !el) return;
+                const rect = el.getBoundingClientRect();
+                const dx = clientX - d.startX;
+                const deltaSeconds = (dx / Math.max(1, rect.width)) * t.durationSeconds;
+                const clip = t.clips.find((c) => c.id === d.clipId);
+                if (!clip) return;
 
-              {!timeline ? <div className="timelineEmpty">Upload a video to generate a timeline.</div> : null}
-            </div>
+                const minLen = 0.2;
+                let start = clip.start;
+                let end = clip.end;
+                if (d.handle === "in") start = clamp(d.start + deltaSeconds, 0, end - minLen);
+                if (d.handle === "out") end = clamp(d.end + deltaSeconds, start + minLen, t.durationSeconds);
+                d.didMove = true;
+
+                // Live update without adding undo history each tick.
+                updateSelectedClip({ start, end }, { history: false });
+              }}
+              onEndDrag={() => {
+                const d = dragRef.current;
+                if (!d) return;
+                dragRef.current = null;
+                if (!d.didMove) return;
+                // Push a single undo snapshot for the whole drag.
+                setPast((p) => [...p, d.prevState].slice(-50));
+                setFuture([]);
+                stopEditedPreview();
+                setExportUrl(null);
+                setExportError(null);
+              }}
+            />
 
             <div className="timelineFooter">
               <div className="mono">Duration: {fmt(totalDuration)}</div>
@@ -724,4 +761,115 @@ function fmt(seconds: number) {
 
 function clamp(n: number, a: number, b: number) {
   return Math.max(a, Math.min(b, n));
+}
+
+function pct(n: number) {
+  return `${(n * 100).toFixed(3)}%`;
+}
+
+function TimelineStrip({
+  refEl,
+  timeline,
+  selectedClipId,
+  onSelect,
+  videoRef,
+  onBeginDrag,
+  onDrag,
+  onEndDrag
+}: {
+  refEl: MutableRefObject<HTMLDivElement | null>;
+  timeline: Timeline | null;
+  selectedClipId: string | null;
+  onSelect: (id: string) => void;
+  videoRef: MutableRefObject<HTMLVideoElement | null>;
+  onBeginDrag: (clipId: string, handle: "in" | "out", startX: number) => void;
+  onDrag: (clientX: number) => void;
+  onEndDrag: () => void;
+}) {
+  const [playhead, setPlayhead] = useState(0);
+
+  useEffect(() => {
+    const v = videoRef.current;
+    if (!v) return;
+    const onTimeUpdate = () => setPlayhead(v.currentTime || 0);
+    v.addEventListener("timeupdate", onTimeUpdate);
+    return () => v.removeEventListener("timeupdate", onTimeUpdate);
+  }, [videoRef]);
+
+  useEffect(() => {
+    const onMove = (e: PointerEvent) => onDrag(e.clientX);
+    const onUp = () => onEndDrag();
+    window.addEventListener("pointermove", onMove);
+    window.addEventListener("pointerup", onUp);
+    return () => {
+      window.removeEventListener("pointermove", onMove);
+      window.removeEventListener("pointerup", onUp);
+    };
+  }, [onDrag, onEndDrag]);
+
+  const duration = Math.max(0.001, timeline?.durationSeconds ?? 1);
+  const playheadX = clamp(playhead / duration, 0, 1);
+
+  return (
+    <div className="timelineStripWrap">
+      <div
+        className="timelineStrip"
+        ref={refEl}
+        onPointerDown={(e) => {
+          const el = refEl.current;
+          const v = videoRef.current;
+          if (!el || !v || !timeline) return;
+          const rect = el.getBoundingClientRect();
+          const x = clamp((e.clientX - rect.left) / Math.max(1, rect.width), 0, 1);
+          v.currentTime = x * timeline.durationSeconds;
+          v.play().catch(() => {});
+        }}
+        role="list"
+        aria-label="Timeline strip"
+      >
+        {timeline?.clips?.map((c) => {
+          const left = clamp(c.start / duration, 0, 1);
+          const width = clamp((c.end - c.start) / duration, 0.002, 1);
+          const isSelected = c.id === selectedClipId;
+          return (
+            <div
+              key={c.id}
+              className={`tlClip ${isSelected ? "isSelected" : ""}`}
+              style={{ left: pct(left), width: pct(width) } as any}
+              role="listitem"
+              title={`${c.label} (${fmt(c.start)}–${fmt(c.end)})`}
+              onPointerDown={(e) => {
+                e.stopPropagation();
+                onSelect(c.id);
+              }}
+            >
+              <div
+                className="tlHandle left"
+                onPointerDown={(e) => {
+                  e.stopPropagation();
+                  onSelect(c.id);
+                  onBeginDrag(c.id, "in", e.clientX);
+                }}
+                aria-label="Trim in"
+              />
+              <div className="tlLabel">{c.label}</div>
+              <div
+                className="tlHandle right"
+                onPointerDown={(e) => {
+                  e.stopPropagation();
+                  onSelect(c.id);
+                  onBeginDrag(c.id, "out", e.clientX);
+                }}
+                aria-label="Trim out"
+              />
+            </div>
+          );
+        })}
+
+        <div className="playhead" style={{ left: pct(playheadX) } as any} aria-hidden="true" />
+      </div>
+
+      {!timeline ? <div className="timelineEmpty">Upload a video to generate a timeline.</div> : null}
+    </div>
+  );
 }
