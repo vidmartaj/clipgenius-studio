@@ -162,6 +162,30 @@ body {
   align-items: center;
   flex-wrap: wrap;
 }
+
+.seg{
+  display:inline-flex;
+  align-items:center;
+  gap:6px;
+  padding: 6px;
+  border-radius: 999px;
+  border: 1px solid rgba(255,255,255,0.12);
+  background: rgba(255,255,255,0.03);
+}
+.segBtn{
+  height: 34px;
+  padding: 0 14px;
+  border-radius: 999px;
+  border: 0;
+  background: transparent;
+  color: rgba(242,245,255,0.72);
+  font-weight: 900;
+  cursor: pointer;
+}
+.segBtn.isOn{
+  background: rgba(255,255,255,0.10);
+  color: rgba(242,245,255,0.92);
+}
 .tool {
   border-radius: 14px;
   padding: 10px 12px;
@@ -173,6 +197,52 @@ body {
 }
 .tool:disabled { opacity: 0.55; cursor: not-allowed; }
 .toolHint { color: var(--muted); font-size: 12px; margin-left: auto; }
+
+.trimRow{
+  display:flex;
+  gap:12px;
+  padding: 0 14px 14px;
+  align-items: flex-end;
+  flex-wrap: wrap;
+}
+.trimField{
+  display:grid;
+  gap:6px;
+}
+.trimField.grow{ flex: 1; min-width: 180px; }
+.trimField label{
+  font-size: 12px;
+  color: var(--muted);
+  font-weight: 700;
+}
+.trimField input{
+  width: 140px;
+  height: 40px;
+  border-radius: 14px;
+  border: 1px solid rgba(255,255,255,0.12);
+  background: rgba(255,255,255,0.03);
+  padding: 0 12px;
+  color: rgba(242,245,255,0.92);
+  outline: none;
+}
+.trimField input:focus{
+  border-color: rgba(93, 214, 255, 0.35);
+  box-shadow: 0 0 0 3px rgba(93, 214, 255, 0.10);
+}
+.trimHint{
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
+  font-size: 12px;
+  color: rgba(242,245,255,0.60);
+}
+.trimMeta{
+  height: 40px;
+  display:flex;
+  align-items:center;
+  padding: 0 12px;
+  border-radius: 14px;
+  border: 1px solid rgba(255,255,255,0.08);
+  background: rgba(255,255,255,0.02);
+}
 
 .timelineCard { padding: 14px; }
 .timelineHead { display: flex; align-items: center; justify-content: space-between; margin-bottom: 12px; }

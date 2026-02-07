@@ -9,6 +9,8 @@ type ExportSettings = {
   format: "MP4";
 };
 
+type PreviewMode = "original" | "edited";
+
 const DEFAULT_EXPORT: ExportSettings = { resolution: "720p", format: "MP4" };
 
 export default function StudioPage() {
@@ -29,6 +31,7 @@ export default function StudioPage() {
   const [timeline, setTimeline] = useState<Timeline | null>(null);
   const [selectedClipId, setSelectedClipId] = useState<string | null>(null);
   const [editedPreviewOn, setEditedPreviewOn] = useState(false);
+  const [previewMode, setPreviewMode] = useState<PreviewMode>("original");
 
   const [exportSettings, setExportSettings] = useState<ExportSettings>(DEFAULT_EXPORT);
   const [isExporting, setIsExporting] = useState(false);
@@ -62,6 +65,8 @@ export default function StudioPage() {
     if (!file) return;
     setIsUploading(true);
     setUploadError(null);
+    setExportUrl(null);
+    setExportError(null);
 
     try {
       const fd = new FormData();
@@ -76,6 +81,8 @@ export default function StudioPage() {
 
       setProjectId(data.projectId);
       setVideoUrl(data.videoUrl);
+      setPreviewMode("original");
+      stopEditedPreview();
 
       if (data.timeline && data.timeline.clips?.length) {
         setTimeline(data.timeline);
@@ -159,6 +166,11 @@ export default function StudioPage() {
     v.play().catch(() => {});
   }
 
+  function setPreview(mode: PreviewMode) {
+    setPreviewMode(mode);
+    stopEditedPreview();
+  }
+
   useEffect(() => {
     const v = videoRef.current;
     if (!v) return;
@@ -227,6 +239,39 @@ export default function StudioPage() {
     if (remaining.length === 0) return;
     setTimeline({ ...timeline, clips: remaining });
     setSelectedClipId(remaining[0].id);
+  }
+
+  function updateSelectedClip(patch: Partial<Pick<TimelineClip, "start" | "end" | "label">>) {
+    if (!timeline || !selectedClip) return;
+    const minLen = 0.2;
+    let start = patch.start ?? selectedClip.start;
+    let end = patch.end ?? selectedClip.end;
+
+    // Clamp to [0, duration] and enforce min length.
+    start = clamp(start, 0, Math.max(0, totalDuration));
+    end = clamp(end, 0, Math.max(0, totalDuration));
+    if (end - start < minLen) {
+      if (patch.start != null && patch.end == null) end = start + minLen;
+      else if (patch.end != null && patch.start == null) start = end - minLen;
+      else end = start + minLen;
+    }
+
+    const nextClips = timeline.clips.map((c) =>
+      c.id === selectedClip.id ? { ...c, ...patch, start, end } : c
+    );
+    setTimeline({ ...timeline, clips: nextClips });
+  }
+
+  function setInToPlayhead() {
+    const v = videoRef.current;
+    if (!v || !selectedClip) return;
+    updateSelectedClip({ start: clamp(v.currentTime, 0, selectedClip.end - 0.2) });
+  }
+
+  function setOutToPlayhead() {
+    const v = videoRef.current;
+    if (!v || !selectedClip) return;
+    updateSelectedClip({ end: clamp(v.currentTime, selectedClip.start + 0.2, totalDuration) });
   }
 
   async function sendToAssistant(text: string) {
@@ -309,6 +354,8 @@ export default function StudioPage() {
               setVideoUrl(null);
               setTimeline(null);
               setSelectedClipId(null);
+              setPreviewMode("original");
+              stopEditedPreview();
               if (videoRef.current) videoRef.current.pause();
             }}
             disabled={!videoUrl || isUploading}
@@ -337,7 +384,7 @@ export default function StudioPage() {
                   <video
                     ref={videoRef}
                     src={videoUrl}
-                    controls={!editedPreviewOn}
+                    controls={previewMode === "original"}
                     onLoadedMetadata={onLoadedMetadata}
                   />
                 ) : (
@@ -349,21 +396,56 @@ export default function StudioPage() {
             </div>
 
             <div className="toolbar" aria-label="Editing tools">
-              <button className="tool" onClick={playEditedSequence} disabled={!timeline || (timeline?.clips.length ?? 0) === 0}>
-                Play edited preview
-              </button>
-              <button className="tool" onClick={stopEditedPreview} disabled={!editedPreviewOn}>
-                Stop preview
-              </button>
+              <div className="seg" role="tablist" aria-label="Preview mode">
+                <button
+                  type="button"
+                  className={`segBtn ${previewMode === "original" ? "isOn" : ""}`}
+                  onClick={() => setPreview("original")}
+                  role="tab"
+                  aria-selected={previewMode === "original"}
+                >
+                  Original
+                </button>
+                <button
+                  type="button"
+                  className={`segBtn ${previewMode === "edited" ? "isOn" : ""}`}
+                  onClick={() => setPreview("edited")}
+                  role="tab"
+                  aria-selected={previewMode === "edited"}
+                >
+                  Edited
+                </button>
+              </div>
+
+              {previewMode === "edited" ? (
+                <>
+                  <button
+                    className="tool"
+                    onClick={playEditedSequence}
+                    disabled={!timeline || (timeline?.clips.length ?? 0) === 0}
+                  >
+                    Play
+                  </button>
+                  <button className="tool" onClick={stopEditedPreview} disabled={!editedPreviewOn}>
+                    Stop
+                  </button>
+                </>
+              ) : null}
+
               <button className="tool" onClick={onSplit} disabled={!selectedClip}>
                 Split
               </button>
               <button className="tool" onClick={onDeleteClip} disabled={!selectedClip || (timeline?.clips.length ?? 0) <= 1}>
                 Delete
               </button>
-              <button className="tool" disabled>
-                Trim
+
+              <button className="tool" onClick={setInToPlayhead} disabled={!selectedClip}>
+                Set In
               </button>
+              <button className="tool" onClick={setOutToPlayhead} disabled={!selectedClip}>
+                Set Out
+              </button>
+
               <button className="tool" disabled>
                 Transitions
               </button>
@@ -374,9 +456,47 @@ export default function StudioPage() {
                 Captions
               </button>
               <div className="toolHint">
-                Preview plays only timeline clips. Split/Delete affects the preview immediately.
+                Tip: switch to “Edited”, then hit Play. Set In/Out trims the selected clip.
               </div>
             </div>
+
+            {selectedClip ? (
+              <div className="trimRow" aria-label="Trim values">
+                <div className="trimField">
+                  <label htmlFor="clipStart">In</label>
+                  <input
+                    id="clipStart"
+                    type="number"
+                    inputMode="decimal"
+                    min={0}
+                    max={Math.max(0, totalDuration)}
+                    step={0.1}
+                    value={Number.isFinite(selectedClip.start) ? Number(selectedClip.start.toFixed(1)) : 0}
+                    onChange={(e) => updateSelectedClip({ start: Number(e.target.value) })}
+                  />
+                  <span className="trimHint">{fmt(selectedClip.start)}</span>
+                </div>
+                <div className="trimField">
+                  <label htmlFor="clipEnd">Out</label>
+                  <input
+                    id="clipEnd"
+                    type="number"
+                    inputMode="decimal"
+                    min={0}
+                    max={Math.max(0, totalDuration)}
+                    step={0.1}
+                    value={Number.isFinite(selectedClip.end) ? Number(selectedClip.end.toFixed(1)) : 0}
+                    onChange={(e) => updateSelectedClip({ end: Number(e.target.value) })}
+                  />
+                  <span className="trimHint">{fmt(selectedClip.end)}</span>
+                </div>
+                <div className="trimField grow">
+                  <div className="trimMeta">
+                    <span className="mono">Clip length: {fmt(Math.max(0, selectedClip.end - selectedClip.start))}</span>
+                  </div>
+                </div>
+              </div>
+            ) : null}
           </section>
 
           <section className="timelineCard" aria-label="AI Timeline">
@@ -398,7 +518,8 @@ export default function StudioPage() {
                   className={`clip ${clip.id === selectedClipId ? "isSelected" : ""}`}
                   onClick={() => {
                     setSelectedClipId(clip.id);
-                    playClipPreview(clip);
+                    if (previewMode === "edited") playClipPreview(clip);
+                    else seekTo(clip.start);
                   }}
                   role="listitem"
                   title={`${clip.label} (${fmt(clip.start)}–${fmt(clip.end)})`}
@@ -519,4 +640,8 @@ function fmt(seconds: number) {
   const m = Math.floor(s / 60);
   const r = s % 60;
   return `${m}:${String(r).padStart(2, "0")}`;
+}
+
+function clamp(n: number, a: number, b: number) {
+  return Math.max(a, Math.min(b, n));
 }
