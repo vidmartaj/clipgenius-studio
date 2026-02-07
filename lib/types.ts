@@ -1,17 +1,32 @@
-export type TimelineClipKind = "source" | "highlight" | "broll";
+// Analysis timeline (scene detection / AI suggestions on a single asset)
+export type AnalysisClipKind = "source" | "highlight" | "broll";
 
-export type TimelineClip = {
+export type AnalysisClip = {
   id: string;
   label: string;
-  kind: TimelineClipKind;
+  kind: AnalysisClipKind;
   start: number;
   end: number;
 };
 
-export type Timeline = {
-  projectId: string;
+export type AnalysisTimeline = {
+  assetId: string;
   durationSeconds: number;
-  clips: TimelineClip[];
+  clips: AnalysisClip[];
+};
+
+// Project timeline (what the user actually exports)
+export type ProjectClip = {
+  id: string;
+  assetId: string;
+  label: string;
+  sourceIn: number;
+  sourceOut: number;
+};
+
+export type ProjectTimeline = {
+  projectId: string;
+  clips: ProjectClip[];
 };
 
 export type AssistantOperation =
@@ -24,4 +39,3 @@ export type AssistantReply = {
   reply: string;
   operations?: AssistantOperation[];
 };
-

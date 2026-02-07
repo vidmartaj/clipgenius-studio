@@ -2,7 +2,7 @@ import { NextResponse } from "next/server";
 import { spawn } from "node:child_process";
 import { writeFile } from "node:fs/promises";
 import path from "node:path";
-import type { Timeline, TimelineClip } from "../../../lib/types";
+import type { AnalysisTimeline, AnalysisClip } from "../../../lib/types";
 
 export const runtime = "nodejs";
 
@@ -13,9 +13,9 @@ export async function POST(req: Request) {
     return new NextResponse("Missing file", { status: 400 });
   }
 
-  const projectId = crypto.randomUUID();
+  const assetId = crypto.randomUUID();
   const ext = guessExt(file.type) ?? "mp4";
-  const filename = `${projectId}.${ext}`;
+  const filename = `${assetId}.${ext}`;
 
   // MVP ONLY: write into /public so Next can serve it in dev.
   // Production: store in S3/R2 and return a signed URL.
@@ -28,20 +28,31 @@ export async function POST(req: Request) {
 
   // Auto timeline generation (scene cuts) using ffprobe/ffmpeg.
   // If ffmpeg isn't available or fails, we still return the uploaded URL.
-  let timeline: Timeline | null = null;
   try {
     const durationSeconds = await getDurationSeconds(dst);
-    const sceneTimes = await detectSceneCuts(dst, { threshold: 0.25, maxCuts: 24 });
+    let sceneTimes: number[] = [];
+    try {
+      sceneTimes = await detectSceneCuts(dst, { threshold: 0.25, maxCuts: 24 });
+    } catch {
+      // Keep going — we can still build a usable fallback timeline.
+      sceneTimes = [];
+    }
     const clips = buildClipsFromCuts(durationSeconds, sceneTimes, { minClipSeconds: 2, maxClips: 12 });
-    timeline = { projectId, durationSeconds, clips };
+    const analysis: AnalysisTimeline = { assetId, durationSeconds, clips };
+
+    return NextResponse.json({
+      assetId,
+      videoUrl,
+      analysis
+    });
   } catch {
-    // Ignore — Studio will fall back to a single full-length clip.
+    // Total failure: return upload without analysis.
   }
 
   return NextResponse.json({
-    projectId,
+    assetId,
     videoUrl,
-    timeline
+    analysis: null
   });
 }
 
@@ -127,11 +138,11 @@ function buildClipsFromCuts(
   durationSeconds: number,
   cuts: number[],
   opts: { minClipSeconds: number; maxClips: number }
-): TimelineClip[] {
+): AnalysisClip[] {
   const times = [0, ...cuts.filter((t) => t > 0.3 && t < durationSeconds - 0.3), durationSeconds];
   times.sort((a, b) => a - b);
 
-  let clips: TimelineClip[] = [];
+  let clips: AnalysisClip[] = [];
   for (let i = 0; i < times.length - 1; i++) {
     const start = times[i];
     const end = times[i + 1];
@@ -147,7 +158,7 @@ function buildClipsFromCuts(
 
   // Merge tiny clips into the next clip to keep the UI clean.
   const minLen = Math.max(0.5, opts.minClipSeconds);
-  const merged: TimelineClip[] = [];
+  const merged: AnalysisClip[] = [];
   for (let i = 0; i < clips.length; i++) {
     const c = clips[i];
     const len = c.end - c.start;

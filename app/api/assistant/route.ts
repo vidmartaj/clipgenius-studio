@@ -1,10 +1,10 @@
 import { NextResponse } from "next/server";
-import type { AssistantReply, Timeline } from "../../../lib/types";
+import type { AssistantReply, ProjectTimeline } from "../../../lib/types";
 
 export const runtime = "nodejs";
 
 export async function POST(req: Request) {
-  const body = (await req.json()) as { projectId?: string; message?: string; timeline?: Timeline };
+  const body = (await req.json()) as { projectId?: string; message?: string; timeline?: ProjectTimeline };
   const message = (body.message ?? "").toLowerCase();
 
   const reply: AssistantReply = {

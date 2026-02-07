@@ -3,7 +3,7 @@ import { spawn } from "node:child_process";
 import { readFile, writeFile, mkdir } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import type { Timeline } from "../../../lib/types";
+import type { ProjectTimeline } from "../../../lib/types";
 
 export const runtime = "nodejs";
 
@@ -12,49 +12,65 @@ type ExportFormat = "MP4";
 
 export async function POST(req: Request) {
   const body = (await req.json()) as {
-    videoUrl?: string;
-    timeline?: Timeline;
+    assets?: Array<{ assetId: string; videoUrl: string }>;
+    timeline?: ProjectTimeline;
     resolution?: ExportResolution;
     format?: ExportFormat;
   };
 
-  const videoUrl = String(body.videoUrl ?? "");
   const timeline = body.timeline;
+  const assets = body.assets ?? [];
   const resolution = (body.resolution ?? "720p") as ExportResolution;
   const format = (body.format ?? "MP4") as ExportFormat;
 
-  if (!videoUrl.startsWith("/uploads/")) {
-    return new NextResponse("Invalid videoUrl", { status: 400 });
-  }
   if (!timeline || !Array.isArray(timeline.clips) || timeline.clips.length === 0) {
     return new NextResponse("Missing timeline", { status: 400 });
+  }
+  if (!Array.isArray(assets) || assets.length === 0) {
+    return new NextResponse("Missing assets", { status: 400 });
   }
   if (format !== "MP4") {
     return new NextResponse("Unsupported format", { status: 400 });
   }
 
-  const src = path.join(process.cwd(), "public", videoUrl.replace(/^\/+/, ""));
-  // Ensure file exists (throws if missing).
-  await readFile(src);
+  const assetMap = new Map<string, string>();
+  for (const a of assets) {
+    if (!a?.assetId || typeof a.assetId !== "string") continue;
+    if (!a?.videoUrl || typeof a.videoUrl !== "string") continue;
+    if (!a.videoUrl.startsWith("/uploads/")) continue;
+    assetMap.set(a.assetId, a.videoUrl);
+  }
+  if (assetMap.size === 0) return new NextResponse("Invalid assets", { status: 400 });
 
-  // Sort clips by start time for a sane export.
   const clips = [...timeline.clips]
-    .map((c) => ({
-      start: clamp(Number(c.start), 0, timeline.durationSeconds),
-      end: clamp(Number(c.end), 0, timeline.durationSeconds)
-    }))
-    .filter((c) => Number.isFinite(c.start) && Number.isFinite(c.end) && c.end > c.start + 0.05)
-    .sort((a, b) => a.start - b.start);
+    .map((c) => {
+      const url = assetMap.get(c.assetId);
+      if (!url) return null;
+      const src = path.join(process.cwd(), "public", url.replace(/^\/+/, ""));
+      return {
+        src,
+        inpoint: Number(c.sourceIn),
+        outpoint: Number(c.sourceOut)
+      };
+    })
+    .filter((c): c is NonNullable<typeof c> => !!c)
+    .filter((c) => Number.isFinite(c.inpoint) && Number.isFinite(c.outpoint) && c.outpoint > c.inpoint + 0.05);
 
   if (clips.length === 0) {
     return new NextResponse("Timeline has no usable clips", { status: 400 });
   }
 
+  // Ensure all source files exist.
+  for (const c of clips) await readFile(c.src);
+
   // Build concat list file. inpoint/outpoint is supported by ffmpeg concat demuxer.
   const concat = clips
     .map((c) => {
-      // Using the same file repeatedly is OK.
-      return `file '${escapeForConcat(src)}'\n` + `inpoint ${c.start.toFixed(3)}\n` + `outpoint ${c.end.toFixed(3)}\n`;
+      return (
+        `file '${escapeForConcat(c.src)}'\n` +
+        `inpoint ${c.inpoint.toFixed(3)}\n` +
+        `outpoint ${c.outpoint.toFixed(3)}\n`
+      );
     })
     .join("");
 
@@ -143,4 +159,3 @@ function escapeForConcat(p: string) {
 function clamp(n: number, a: number, b: number) {
   return Math.max(a, Math.min(b, n));
 }
-
