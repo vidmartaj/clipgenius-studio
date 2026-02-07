@@ -9,9 +9,12 @@ type ExportSettings = {
   format: "MP4";
 };
 
-type PreviewMode = "original" | "edited";
-
 const DEFAULT_EXPORT: ExportSettings = { resolution: "720p", format: "MP4" };
+
+type HistoryState = {
+  timeline: Timeline | null;
+  selectedClipId: string | null;
+};
 
 export default function StudioPage() {
   const videoRef = useRef<HTMLVideoElement | null>(null);
@@ -31,7 +34,9 @@ export default function StudioPage() {
   const [timeline, setTimeline] = useState<Timeline | null>(null);
   const [selectedClipId, setSelectedClipId] = useState<string | null>(null);
   const [editedPreviewOn, setEditedPreviewOn] = useState(false);
-  const [previewMode, setPreviewMode] = useState<PreviewMode>("original");
+
+  const [past, setPast] = useState<HistoryState[]>([]);
+  const [future, setFuture] = useState<HistoryState[]>([]);
 
   const [exportSettings, setExportSettings] = useState<ExportSettings>(DEFAULT_EXPORT);
   const [isExporting, setIsExporting] = useState(false);
@@ -61,12 +66,77 @@ export default function StudioPage() {
     }
   }, [timeline, selectedClipId]);
 
+  function commit(next: HistoryState) {
+    // Commit changes with undo/redo support.
+    setPast((p) => {
+      const cur: HistoryState = { timeline, selectedClipId };
+      const nextPast = [...p, cur].slice(-50);
+      return nextPast;
+    });
+    setFuture([]);
+    setTimeline(next.timeline);
+    setSelectedClipId(next.selectedClipId);
+    stopEditedPreview();
+    setExportUrl(null);
+    setExportError(null);
+  }
+
+  function undo() {
+    setPast((p) => {
+      if (p.length === 0) return p;
+      const prev = p[p.length - 1];
+      setFuture((f) => [{ timeline, selectedClipId }, ...f].slice(0, 50));
+      setTimeline(prev.timeline);
+      setSelectedClipId(prev.selectedClipId);
+      stopEditedPreview();
+      setExportUrl(null);
+      setExportError(null);
+      return p.slice(0, -1);
+    });
+  }
+
+  function redo() {
+    setFuture((f) => {
+      if (f.length === 0) return f;
+      const next = f[0];
+      setPast((p) => [...p, { timeline, selectedClipId }].slice(-50));
+      setTimeline(next.timeline);
+      setSelectedClipId(next.selectedClipId);
+      stopEditedPreview();
+      setExportUrl(null);
+      setExportError(null);
+      return f.slice(1);
+    });
+  }
+
+  useEffect(() => {
+    const onKeyDown = (e: KeyboardEvent) => {
+      const isMac = navigator.platform.toLowerCase().includes("mac");
+      const mod = isMac ? e.metaKey : e.ctrlKey;
+      if (!mod) return;
+
+      if (e.key.toLowerCase() === "z") {
+        e.preventDefault();
+        if (e.shiftKey) redo();
+        else undo();
+      } else if (e.key.toLowerCase() === "y") {
+        e.preventDefault();
+        redo();
+      }
+    };
+
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [timeline, selectedClipId]);
+
   async function onPickFile(file?: File) {
     if (!file) return;
     setIsUploading(true);
     setUploadError(null);
     setExportUrl(null);
     setExportError(null);
+    setPast([]);
+    setFuture([]);
 
     try {
       const fd = new FormData();
@@ -81,7 +151,6 @@ export default function StudioPage() {
 
       setProjectId(data.projectId);
       setVideoUrl(data.videoUrl);
-      setPreviewMode("original");
       stopEditedPreview();
 
       if (data.timeline && data.timeline.clips?.length) {
@@ -166,11 +235,6 @@ export default function StudioPage() {
     v.play().catch(() => {});
   }
 
-  function setPreview(mode: PreviewMode) {
-    setPreviewMode(mode);
-    stopEditedPreview();
-  }
-
   useEffect(() => {
     const v = videoRef.current;
     if (!v) return;
@@ -229,16 +293,14 @@ export default function StudioPage() {
     const t = v.currentTime || 0;
     const next = splitClipAt(timeline, selectedClip.id, t);
     if (!next) return;
-    setTimeline(next.timeline);
-    setSelectedClipId(next.newSelectedId);
+    commit({ timeline: next.timeline, selectedClipId: next.newSelectedId });
   }
 
   function onDeleteClip() {
     if (!timeline || !selectedClip) return;
     const remaining = timeline.clips.filter((c) => c.id !== selectedClip.id);
     if (remaining.length === 0) return;
-    setTimeline({ ...timeline, clips: remaining });
-    setSelectedClipId(remaining[0].id);
+    commit({ timeline: { ...timeline, clips: remaining }, selectedClipId: remaining[0].id });
   }
 
   function updateSelectedClip(patch: Partial<Pick<TimelineClip, "start" | "end" | "label">>) {
@@ -259,7 +321,7 @@ export default function StudioPage() {
     const nextClips = timeline.clips.map((c) =>
       c.id === selectedClip.id ? { ...c, ...patch, start, end } : c
     );
-    setTimeline({ ...timeline, clips: nextClips });
+    commit({ timeline: { ...timeline, clips: nextClips }, selectedClipId });
   }
 
   function setInToPlayhead() {
@@ -302,7 +364,7 @@ export default function StudioPage() {
           t = trimTimelineToTargetSeconds(t, op.targetSeconds);
         }
       }
-      setTimeline(t);
+      commit({ timeline: t, selectedClipId: t.clips[0]?.id ?? null });
     }
   }
 
@@ -334,7 +396,7 @@ export default function StudioPage() {
 
   return (
     <main className="studio">
-      <header className="studioTop">
+      <header className="studioTop" role="banner">
         <div className="filePill">
           <span className={`statusDot ${videoUrl ? "on" : ""}`} aria-hidden="true" />
           <div>
@@ -344,6 +406,12 @@ export default function StudioPage() {
         </div>
 
         <div className="topActions">
+          <button className="btn ghost" onClick={undo} disabled={past.length === 0} aria-label="Undo">
+            Undo
+          </button>
+          <button className="btn ghost" onClick={redo} disabled={future.length === 0} aria-label="Redo">
+            Redo
+          </button>
           <button className="btn ghost" onClick={() => fileInputRef.current?.click()} disabled={isUploading}>
             {isUploading ? "Uploading…" : "Upload"}
           </button>
@@ -354,8 +422,9 @@ export default function StudioPage() {
               setVideoUrl(null);
               setTimeline(null);
               setSelectedClipId(null);
-              setPreviewMode("original");
               stopEditedPreview();
+              setPast([]);
+              setFuture([]);
               if (videoRef.current) videoRef.current.pause();
             }}
             disabled={!videoUrl || isUploading}
@@ -376,7 +445,43 @@ export default function StudioPage() {
       {uploadError ? <div className="alert" role="alert">{uploadError}</div> : null}
 
       <section className="shell">
-        <section className="left">
+        <aside className="sidebar" aria-label="Tools">
+          <div className="sideTitle">Library</div>
+          <div className="sideNav" role="list">
+            <button className="sideItem isActive" type="button" role="listitem">Footage</button>
+            <button className="sideItem" type="button" role="listitem" disabled>Audio</button>
+            <button className="sideItem" type="button" role="listitem" disabled>Text</button>
+            <button className="sideItem" type="button" role="listitem" disabled>Effects</button>
+            <button className="sideItem" type="button" role="listitem" disabled>Transitions</button>
+          </div>
+
+          <div className="sideBin">
+            <div className="sideBinHead">
+              <div className="sideBinTitle">Clips</div>
+              <div className="sideBinMeta">{timeline ? `${timeline.clips.length}` : "—"}</div>
+            </div>
+            <div className="sideBinBody">
+              {(timeline?.clips ?? []).slice(0, 6).map((c) => (
+                <button
+                  key={c.id}
+                  type="button"
+                  className={`binClip ${c.id === selectedClipId ? "isSelected" : ""}`}
+                  onClick={() => {
+                    setSelectedClipId(c.id);
+                    playClipPreview(c);
+                  }}
+                  title={c.label}
+                >
+                  <div className="binClipTitle">{c.label}</div>
+                  <div className="binClipSub">{fmt(c.start)}–{fmt(c.end)}</div>
+                </button>
+              ))}
+              {!timeline ? <div className="binEmpty">Upload a video to populate your timeline.</div> : null}
+            </div>
+          </div>
+        </aside>
+
+        <section className="center">
           <section className="playerCard">
             <div className="player">
               <div className="playerViewport">
@@ -384,7 +489,7 @@ export default function StudioPage() {
                   <video
                     ref={videoRef}
                     src={videoUrl}
-                    controls={previewMode === "original"}
+                    controls
                     onLoadedMetadata={onLoadedMetadata}
                   />
                 ) : (
@@ -396,41 +501,17 @@ export default function StudioPage() {
             </div>
 
             <div className="toolbar" aria-label="Editing tools">
-              <div className="seg" role="tablist" aria-label="Preview mode">
-                <button
-                  type="button"
-                  className={`segBtn ${previewMode === "original" ? "isOn" : ""}`}
-                  onClick={() => setPreview("original")}
-                  role="tab"
-                  aria-selected={previewMode === "original"}
-                >
-                  Original
-                </button>
-                <button
-                  type="button"
-                  className={`segBtn ${previewMode === "edited" ? "isOn" : ""}`}
-                  onClick={() => setPreview("edited")}
-                  role="tab"
-                  aria-selected={previewMode === "edited"}
-                >
-                  Edited
-                </button>
-              </div>
-
-              {previewMode === "edited" ? (
-                <>
-                  <button
-                    className="tool"
-                    onClick={playEditedSequence}
-                    disabled={!timeline || (timeline?.clips.length ?? 0) === 0}
-                  >
-                    Play
-                  </button>
-                  <button className="tool" onClick={stopEditedPreview} disabled={!editedPreviewOn}>
-                    Stop
-                  </button>
-                </>
-              ) : null}
+              <button
+                className="tool"
+                onClick={playEditedSequence}
+                disabled={!timeline || (timeline?.clips.length ?? 0) === 0}
+                aria-label="Play edited preview"
+              >
+                Preview
+              </button>
+              <button className="tool" onClick={stopEditedPreview} disabled={!editedPreviewOn} aria-label="Stop preview">
+                Stop
+              </button>
 
               <button className="tool" onClick={onSplit} disabled={!selectedClip}>
                 Split
@@ -518,8 +599,7 @@ export default function StudioPage() {
                   className={`clip ${clip.id === selectedClipId ? "isSelected" : ""}`}
                   onClick={() => {
                     setSelectedClipId(clip.id);
-                    if (previewMode === "edited") playClipPreview(clip);
-                    else seekTo(clip.start);
+                    playClipPreview(clip);
                   }}
                   role="listitem"
                   title={`${clip.label} (${fmt(clip.start)}–${fmt(clip.end)})`}
