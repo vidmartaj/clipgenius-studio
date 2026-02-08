@@ -242,8 +242,11 @@ body {
   place-items: center;
 }
 .playerViewport video {
-  width: 100%;
-  height: 100%;
+  /* Keep the editor viewport fixed (16:9), and fit any aspect video inside it */
+  width: auto;
+  height: auto;
+  max-width: 100%;
+  max-height: 100%;
   display: block;
   background: #000;
   object-fit: contain;
