@@ -240,16 +240,45 @@ body {
   min-height: 320px;
   display: grid;
   place-items: center;
+  position: relative;
 }
-.playerViewport video {
-  /* Keep the editor viewport fixed (16:9), and fit any aspect video inside it */
+
+/* Layered preview: blurred background fill + sharp foreground fit (CapCut-style) */
+.playerStack{
+  width: 100%;
+  height: 100%;
+  position: relative;
+  display: grid;
+  place-items: center;
+}
+.playerViewport .bgVideo{
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  filter: blur(22px) saturate(1.1) brightness(0.55);
+  transform: scale(1.08);
+  opacity: 0.9;
+  pointer-events: none;
+}
+.playerViewport .fgVideo{
+  position: relative;
+  z-index: 2;
   width: auto;
   height: auto;
   max-width: 100%;
   max-height: 100%;
+  object-fit: contain;
   display: block;
   background: #000;
-  object-fit: contain;
+}
+.playerViewport::after{
+  content:"";
+  position:absolute;
+  inset:0;
+  pointer-events:none;
+  background: radial-gradient(80% 80% at 50% 40%, rgba(0,0,0,0.00) 0%, rgba(0,0,0,0.32) 65%, rgba(0,0,0,0.55) 100%);
 }
 .playerEmpty { width: 100%; height: 100%; display: grid; place-items: center; }
 .bigPlay {

@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 import { spawn } from "node:child_process";
-import { writeFile } from "node:fs/promises";
+import { mkdir, writeFile } from "node:fs/promises";
 import path from "node:path";
 import type { AnalysisTimeline, AnalysisClip } from "../../../lib/types";
 
@@ -20,19 +20,39 @@ export async function POST(req: Request) {
   // MVP ONLY: write into /public so Next can serve it in dev.
   // Production: store in S3/R2 and return a signed URL.
   const publicDir = path.join(process.cwd(), "public", "uploads");
+  await mkdir(publicDir, { recursive: true });
   const dst = path.join(publicDir, filename);
   const bytes = new Uint8Array(await file.arrayBuffer());
   await writeFile(dst, bytes);
 
-  const videoUrl = `/uploads/${filename}`;
+  // Normalize iPhone/QuickTime rotation metadata for browser preview.
+  // Many .mov files store portrait footage as landscape pixels + a rotation tag.
+  // Browsers can render that inconsistently; we bake the rotation into frames.
+  let normalizedPath: string | null = null;
+  let normalizedUrl: string | null = null;
+  try {
+    const info = await getVideoStreamInfo(dst);
+    if (info.rotationDegrees !== 0) {
+      const normName = `${assetId}_norm.mp4`;
+      normalizedPath = path.join(publicDir, normName);
+      await normalizeRotation(dst, normalizedPath, info.rotationDegrees);
+      normalizedUrl = `/uploads/${normName}`;
+    }
+  } catch {
+    // Non-fatal; fall back to original file.
+  }
+
+  const videoUrl = normalizedUrl ?? `/uploads/${filename}`;
 
   // Auto timeline generation (scene cuts) using ffprobe/ffmpeg.
   // If ffmpeg isn't available or fails, we still return the uploaded URL.
   try {
-    const durationSeconds = await getDurationSeconds(dst);
+    // Use the normalized file (if generated) for analysis, so duration/scene cuts match preview.
+    const analyzePath = normalizedPath ?? dst;
+    const durationSeconds = await getDurationSeconds(analyzePath);
     let sceneTimes: number[] = [];
     try {
-      sceneTimes = await detectSceneCuts(dst, { threshold: 0.25, maxCuts: 24 });
+      sceneTimes = await detectSceneCuts(analyzePath, { threshold: 0.25, maxCuts: 24 });
     } catch {
       // Keep going — we can still build a usable fallback timeline.
       sceneTimes = [];
@@ -104,6 +124,86 @@ async function getDurationSeconds(filePath: string) {
   const n = Number(String(stdout).trim());
   if (!Number.isFinite(n) || n <= 0) throw new Error("Could not determine duration");
   return n;
+}
+
+async function getVideoStreamInfo(filePath: string) {
+  const { stdout } = await run(
+    "ffprobe",
+    [
+      "-v",
+      "error",
+      "-select_streams",
+      "v:0",
+      "-show_entries",
+      "stream=width,height:stream_tags=rotate:side_data_list=rotation",
+      "-of",
+      "json",
+      filePath
+    ],
+    { timeoutMs: 30_000 }
+  );
+
+  const json = JSON.parse(stdout || "{}") as any;
+  const stream = json?.streams?.[0] ?? null;
+  const width = Number(stream?.width ?? 0);
+  const height = Number(stream?.height ?? 0);
+
+  let rot = 0;
+  const tagRot = stream?.tags?.rotate;
+  if (tagRot != null) rot = Number(tagRot) || 0;
+
+  // Some builds of ffprobe expose rotation in side_data_list.
+  if (!rot && Array.isArray(stream?.side_data_list)) {
+    for (const sd of stream.side_data_list) {
+      if (sd && sd.rotation != null) {
+        rot = Number(sd.rotation) || 0;
+        break;
+      }
+    }
+  }
+
+  // Normalize to {0,90,180,270}.
+  rot = ((rot % 360) + 360) % 360;
+  if (rot > 315 || rot < 45) rot = 0;
+  else if (rot >= 45 && rot < 135) rot = 90;
+  else if (rot >= 135 && rot < 225) rot = 180;
+  else rot = 270;
+
+  return { width, height, rotationDegrees: rot };
+}
+
+async function normalizeRotation(src: string, dst: string, rotationDegrees: number) {
+  let vf = "";
+  if (rotationDegrees === 90) vf = "transpose=1";
+  else if (rotationDegrees === 270) vf = "transpose=2";
+  else if (rotationDegrees === 180) vf = "transpose=2,transpose=2";
+  else return;
+
+  await run(
+    "ffmpeg",
+    [
+      "-hide_banner",
+      "-y",
+      "-i",
+      src,
+      "-vf",
+      vf,
+      "-c:v",
+      "libx264",
+      "-preset",
+      "veryfast",
+      "-crf",
+      "20",
+      "-c:a",
+      "aac",
+      "-b:a",
+      "128k",
+      "-movflags",
+      "+faststart",
+      dst
+    ],
+    { timeoutMs: 10 * 60_000 }
+  );
 }
 
 async function detectSceneCuts(

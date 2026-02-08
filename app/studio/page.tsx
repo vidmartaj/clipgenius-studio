@@ -34,6 +34,7 @@ type PendingSeek = {
 export default function StudioPage() {
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const videoRef = useRef<HTMLVideoElement | null>(null);
+  const bgVideoRef = useRef<HTMLVideoElement | null>(null);
   const stripRef = useRef<HTMLDivElement | null>(null);
   const pendingSeekRef = useRef<PendingSeek | null>(null);
 
@@ -157,11 +158,17 @@ export default function StudioPage() {
 
     const v = videoRef.current;
     if (!v) return;
+    const bg = bgVideoRef.current;
 
     // If src already matches, onLoadedMetadata may not fire; seek immediately.
     if (v.currentSrc && v.currentSrc.endsWith(nextSrc)) {
       v.currentTime = clamp(seekTo, 0, Number.isFinite(v.duration) ? v.duration : seekTo);
       if (play) v.play().catch(() => {});
+      if (bg) {
+        bg.currentTime = clamp(seekTo, 0, Number.isFinite(bg.duration) ? bg.duration : seekTo);
+        if (play) bg.play().catch(() => {});
+        else bg.pause();
+      }
       pendingSeekRef.current = null;
     }
   }
@@ -176,6 +183,12 @@ export default function StudioPage() {
 
     v.currentTime = clamp(pending.time, 0, Number.isFinite(v.duration) ? v.duration : pending.time);
     if (pending.play) v.play().catch(() => {});
+    const bg = bgVideoRef.current;
+    if (bg) {
+      bg.currentTime = clamp(pending.time, 0, Number.isFinite(bg.duration) ? bg.duration : pending.time);
+      if (pending.play) bg.play().catch(() => {});
+      else bg.pause();
+    }
     pendingSeekRef.current = null;
   }
 
@@ -633,7 +646,36 @@ export default function StudioPage() {
             <div className="player">
               <div className="playerViewport" aria-label="Preview">
                 {playerSrc ? (
-                  <video ref={videoRef} src={playerSrc} controls onLoadedMetadata={onLoadedMetadata} />
+                  <div className="playerStack">
+                    <video
+                      ref={bgVideoRef}
+                      className="bgVideo"
+                      src={playerSrc}
+                      muted
+                      playsInline
+                      preload="metadata"
+                      aria-hidden="true"
+                    />
+                    <video
+                      ref={videoRef}
+                      className="fgVideo"
+                      src={playerSrc}
+                      controls
+                      playsInline
+                      preload="metadata"
+                      onLoadedMetadata={onLoadedMetadata}
+                      onTimeUpdate={() => {
+                        const fg = videoRef.current;
+                        const bg = bgVideoRef.current;
+                        if (!fg || !bg) return;
+                        if (Math.abs((bg.currentTime || 0) - (fg.currentTime || 0)) > 0.12) {
+                          bg.currentTime = fg.currentTime || 0;
+                        }
+                      }}
+                      onPlay={() => bgVideoRef.current?.play().catch(() => {})}
+                      onPause={() => bgVideoRef.current?.pause()}
+                    />
+                  </div>
                 ) : (
                   <div className="playerEmpty" aria-label="No video loaded">
                     <div className="bigPlay" aria-hidden="true" />
@@ -800,7 +842,7 @@ export default function StudioPage() {
                 if (!asset) return;
                 await startClipPlayback(clip, timeline.clips.findIndex((c) => c.id === id), "single");
               }}
-              onScrub={(t) => scrubToProjectTime(t, true)}
+              onScrub={(t, play) => scrubToProjectTime(t, play)}
               onBeginDrag={(clipId, handle, startX) => beginTrimDrag(clipId, handle, startX)}
             />
 
@@ -836,11 +878,21 @@ function TimelineStrip({
   selectedClipId: string | null;
   playheadSeconds: number;
   onSelect: (id: string) => void;
-  onScrub: (t: number) => void;
+  onScrub: (t: number, play: boolean) => void;
   onBeginDrag: (clipId: string, handle: "in" | "out", startX: number) => void;
 }) {
   const duration = Math.max(0.001, durationSeconds || 0.001);
   const playheadX = clamp(playheadSeconds / duration, 0, 1);
+  const scrubRef = useRef<null | { startX: number; moved: boolean }>(null);
+
+  function clientXToProjectTime(clientX: number) {
+    const el = refEl.current;
+    if (!el) return 0;
+    const rect = el.getBoundingClientRect();
+    const xPx = (clientX - rect.left) + (el.scrollLeft || 0);
+    const x = clamp(xPx / Math.max(1, el.scrollWidth || rect.width), 0, 1);
+    return x * duration;
+  }
 
   return (
     <div className="timelineStripWrap">
@@ -848,12 +900,24 @@ function TimelineStrip({
         className="timelineStrip"
         ref={refEl}
         onPointerDown={(e) => {
+          if (e.button !== 0) return;
           const el = refEl.current;
           if (!el) return;
-          const rect = el.getBoundingClientRect();
-          const xPx = (e.clientX - rect.left) + (el.scrollLeft || 0);
-          const x = clamp(xPx / Math.max(1, el.scrollWidth || rect.width), 0, 1);
-          onScrub(x * duration);
+          scrubRef.current = { startX: e.clientX, moved: false };
+          el.setPointerCapture?.(e.pointerId);
+          onScrub(clientXToProjectTime(e.clientX), false);
+        }}
+        onPointerMove={(e) => {
+          const s = scrubRef.current;
+          if (!s) return;
+          if (Math.abs(e.clientX - s.startX) > 2) s.moved = true;
+          onScrub(clientXToProjectTime(e.clientX), false);
+        }}
+        onPointerUp={(e) => {
+          const s = scrubRef.current;
+          scrubRef.current = null;
+          if (!s) return;
+          if (!s.moved) onScrub(clientXToProjectTime(e.clientX), true);
         }}
         role="list"
         aria-label="Timeline strip"
