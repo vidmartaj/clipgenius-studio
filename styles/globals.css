@@ -184,6 +184,8 @@ body {
   text-align: left;
   cursor: pointer;
 }
+.binClip[draggable="true"] { cursor: grab; }
+.binClip[draggable="true"]:active { cursor: grabbing; }
 .binClip.isSelected{
   border-color: rgba(93, 214, 255, 0.35);
   background: rgba(93, 214, 255, 0.10);
@@ -426,6 +428,12 @@ body {
   padding: 0 10px;
   cursor: pointer;
 }
+.tlClip[draggable="true"]{ cursor: grab; }
+.tlClip[draggable="true"]:active{ cursor: grabbing; }
+.tlClip.isDragging{
+  opacity: 0.6;
+  border-style: dashed;
+}
 .tlClip.isSelected{
   border-color: rgba(93, 214, 255, 0.35);
   background: rgba(93, 214, 255, 0.10);
@@ -474,6 +482,29 @@ body {
   height: 10px;
   border-radius: 50%;
   background: rgba(93,214,255,0.95);
+}
+
+.dropMarker{
+  position:absolute;
+  top: 8px;
+  bottom: 8px;
+  width: 2px;
+  background: rgba(155, 123, 255, 0.92);
+  box-shadow: 0 0 18px rgba(155, 123, 255, 0.30);
+  border-radius: 2px;
+  transform: translateX(-1px);
+  pointer-events:none;
+}
+.dropMarker::before{
+  content:"";
+  position:absolute;
+  top: -4px;
+  left: 50%;
+  transform: translateX(-50%);
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  background: rgba(155, 123, 255, 0.92);
 }
 
 .timelineTrack {

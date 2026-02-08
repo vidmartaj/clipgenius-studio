@@ -31,6 +31,12 @@ type PendingSeek = {
   play: boolean;
 };
 
+type DragPayload =
+  | { kind: "asset"; assetId: string }
+  | { kind: "clip"; clipId: string };
+
+const DRAG_MIME = "application/x-clipgenius-studio";
+
 export default function StudioPage() {
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const videoRef = useRef<HTMLVideoElement | null>(null);
@@ -105,6 +111,80 @@ export default function StudioPage() {
       return { ...c, sourceIn, sourceOut };
     });
     return changed ? { ...t, clips } : t;
+  }
+
+  function makeClipFromAsset(a: Asset): ProjectClip | null {
+    if (!a.durationSeconds || !Number.isFinite(a.durationSeconds) || a.durationSeconds <= 0) return null;
+    return {
+      id: crypto.randomUUID(),
+      assetId: a.assetId,
+      label: cleanName(a.name),
+      sourceIn: 0,
+      sourceOut: a.durationSeconds
+    };
+  }
+
+  function computeInsertIndex(projectTime: number) {
+    // Choose insertion index by the closest boundary between clips.
+    const t = clamp(projectTime, 0, duration);
+    let acc = 0;
+    for (let i = 0; i < timeline.clips.length; i++) {
+      const c = timeline.clips[i];
+      const len = Math.max(0, c.sourceOut - c.sourceIn);
+      const start = acc;
+      const end = acc + len;
+      if (t >= start && t <= end) {
+        const before = t - start;
+        const after = end - t;
+        return before <= after ? i : i + 1;
+      }
+      acc = end;
+    }
+    return timeline.clips.length;
+  }
+
+  async function insertAssetAtTime(assetId: string, projectTime: number) {
+    const a = assetsById.get(assetId);
+    if (!a) return;
+    const clip = makeClipFromAsset(a);
+    if (!clip) return;
+    const idx = computeInsertIndex(projectTime);
+    const nextClips = [...timeline.clips.slice(0, idx), clip, ...timeline.clips.slice(idx)];
+    applyWithHistory({ timeline: { ...timeline, clips: nextClips }, selectedClipId: clip.id });
+    await ensurePlayerOnAsset(a, clip.sourceIn, false);
+  }
+
+  async function reorderClipToTime(clipId: string, projectTime: number) {
+    const fromIdx = timeline.clips.findIndex((c) => c.id === clipId);
+    if (fromIdx === -1) return;
+    const clip = timeline.clips[fromIdx];
+    let toIdx = computeInsertIndex(projectTime);
+    // If we're moving forward, removing the clip shifts the target left by 1.
+    if (toIdx > fromIdx) toIdx -= 1;
+    if (toIdx === fromIdx) return;
+    const remaining = timeline.clips.filter((c) => c.id !== clipId);
+    const nextClips = [...remaining.slice(0, toIdx), clip, ...remaining.slice(toIdx)];
+    applyWithHistory({ timeline: { ...timeline, clips: nextClips }, selectedClipId: clipId });
+  }
+
+  function setDragData(e: React.DragEvent, payload: DragPayload) {
+    try {
+      e.dataTransfer.setData(DRAG_MIME, JSON.stringify(payload));
+      e.dataTransfer.effectAllowed = "copyMove";
+    } catch {}
+  }
+
+  function getDragData(e: React.DragEvent): DragPayload | null {
+    try {
+      const raw = e.dataTransfer.getData(DRAG_MIME);
+      if (!raw) return null;
+      const parsed = JSON.parse(raw) as DragPayload;
+      if (parsed?.kind === "asset" && typeof parsed.assetId === "string") return parsed;
+      if (parsed?.kind === "clip" && typeof parsed.clipId === "string") return parsed;
+      return null;
+    } catch {
+      return null;
+    }
   }
 
   // Keep the preview synced to the selected timeline clip (when we're not actively previewing playback).
@@ -244,7 +324,7 @@ export default function StudioPage() {
 
     // Auto-add to project timeline like CapCut: import -> clip appears ready to edit.
     if (durationSeconds > 0) {
-      const clip: ProjectClip = {
+      const clip: ProjectClip = makeClipFromAsset(asset) ?? {
         id: crypto.randomUUID(),
         assetId: asset.assetId,
         label: cleanName(asset.name),
@@ -686,6 +766,8 @@ export default function StudioPage() {
                   <button
                     type="button"
                     className="binClip"
+                    draggable
+                    onDragStart={(e) => setDragData(e, { kind: "asset", assetId: a.assetId })}
                     onClick={() => {
                       // Seek player to start of this asset for preview convenience.
                       ensurePlayerOnAsset(a, 0, false);
@@ -701,13 +783,8 @@ export default function StudioPage() {
                     title="Add to timeline"
                     onClick={() => {
                       if (!a.durationSeconds) return;
-                      const clip: ProjectClip = {
-                        id: crypto.randomUUID(),
-                        assetId: a.assetId,
-                        label: cleanName(a.name),
-                        sourceIn: 0,
-                        sourceOut: a.durationSeconds
-                      };
+                      const clip = makeClipFromAsset(a);
+                      if (!clip) return;
                       applyWithHistory({ timeline: { ...timeline, clips: [...timeline.clips, clip] }, selectedClipId: clip.id });
                       // Immediately show this clip in the preview (without starting playback).
                       void ensurePlayerOnAsset(a, 0, false);
@@ -951,6 +1028,11 @@ export default function StudioPage() {
               }}
               onScrub={(t, play) => scrubToProjectTime(t, play)}
               onBeginDrag={(clipId, handle, startX) => beginTrimDrag(clipId, handle, startX)}
+              onDropPayload={async (payload, t) => {
+                if (payload.kind === "asset") await insertAssetAtTime(payload.assetId, t);
+                if (payload.kind === "clip") await reorderClipToTime(payload.clipId, t);
+              }}
+              getDragData={getDragData}
             />
 
             <div className="timelineFooter">
@@ -976,6 +1058,9 @@ function TimelineStrip({
   onSelect,
   onScrub,
   onBeginDrag
+  ,
+  onDropPayload,
+  getDragData
 }: {
   refEl: MutableRefObject<HTMLDivElement | null>;
   timeline: ProjectTimeline;
@@ -987,10 +1072,14 @@ function TimelineStrip({
   onSelect: (id: string) => void;
   onScrub: (t: number, play: boolean) => void;
   onBeginDrag: (clipId: string, handle: "in" | "out", startX: number) => void;
+  onDropPayload: (payload: DragPayload, projectTime: number) => void;
+  getDragData: (e: React.DragEvent) => DragPayload | null;
 }) {
   const duration = Math.max(0.001, durationSeconds || 0.001);
   const playheadX = clamp(playheadSeconds / duration, 0, 1);
   const scrubRef = useRef<null | { startX: number; moved: boolean }>(null);
+  const [dropAt, setDropAt] = useState<number | null>(null);
+  const [draggingId, setDraggingId] = useState<string | null>(null);
 
   function clientXToProjectTime(clientX: number) {
     const el = refEl.current;
@@ -1030,6 +1119,23 @@ function TimelineStrip({
         }}
         role="list"
         aria-label="Timeline strip"
+        onDragOver={(e) => {
+          const payload = getDragData(e);
+          if (!payload) return;
+          e.preventDefault();
+          e.dataTransfer.dropEffect = payload.kind === "asset" ? "copy" : "move";
+          setDropAt(clientXToProjectTime(e.clientX));
+        }}
+        onDragLeave={() => setDropAt(null)}
+        onDrop={(e) => {
+          const payload = getDragData(e);
+          if (!payload) return;
+          e.preventDefault();
+          const t = clientXToProjectTime(e.clientX);
+          setDropAt(null);
+          setDraggingId(null);
+          onDropPayload(payload, t);
+        }}
       >
         <div className="timelineStripInner" style={{ width: pct(zoom) } as any}>
           {timeline.clips.map((c) => {
@@ -1041,10 +1147,19 @@ function TimelineStrip({
             return (
               <div
                 key={c.id}
-                className={`tlClip ${isSelected ? "isSelected" : ""}`}
+                className={`tlClip ${isSelected ? "isSelected" : ""} ${draggingId === c.id ? "isDragging" : ""}`}
                 style={{ left: pct(left), width: pct(width) } as any}
                 role="listitem"
                 title={`${c.label} (${fmt(len)})`}
+                draggable
+                onDragStart={(e) => {
+                  setDraggingId(c.id);
+                  try {
+                    e.dataTransfer.setData(DRAG_MIME, JSON.stringify({ kind: "clip", clipId: c.id }));
+                    e.dataTransfer.effectAllowed = "move";
+                  } catch {}
+                }}
+                onDragEnd={() => setDraggingId(null)}
                 onPointerDown={(e) => {
                   e.stopPropagation();
                   onSelect(c.id);
@@ -1054,26 +1169,33 @@ function TimelineStrip({
                   className="tlHandle left"
                   onPointerDown={(e) => {
                     e.stopPropagation();
+                    e.preventDefault(); // prevent native drag start
                     onSelect(c.id);
                     onBeginDrag(c.id, "in", e.clientX);
                   }}
                   aria-label="Trim in"
+                  draggable={false}
                 />
                 <div className="tlLabel">{c.label}</div>
                 <div
                   className="tlHandle right"
                   onPointerDown={(e) => {
                     e.stopPropagation();
+                    e.preventDefault(); // prevent native drag start
                     onSelect(c.id);
                     onBeginDrag(c.id, "out", e.clientX);
                   }}
                   aria-label="Trim out"
+                  draggable={false}
                 />
               </div>
             );
           })}
 
           <div className="playhead" style={{ left: pct(playheadX) } as any} aria-hidden="true" />
+          {dropAt != null ? (
+            <div className="dropMarker" style={{ left: pct(clamp(dropAt / duration, 0, 1)) } as any} aria-hidden="true" />
+          ) : null}
         </div>
       </div>
     </div>
