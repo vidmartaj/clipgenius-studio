@@ -394,6 +394,24 @@ body {
   color: rgba(242,245,255,0.76);
 }
 
+.snapBtn{
+  height: 32px;
+  padding: 0 12px;
+  border-radius: 999px;
+  border: 1px solid rgba(255,255,255,0.14);
+  background: rgba(255,255,255,0.03);
+  color: rgba(242,245,255,0.86);
+  font-weight: 900;
+  cursor: pointer;
+}
+.snapBtn.on{
+  border-color: rgba(93, 214, 255, 0.32);
+  background: rgba(93, 214, 255, 0.10);
+}
+.snapBtn.off{
+  opacity: 0.7;
+}
+
 .timelineStripWrap{
   display:grid;
   gap: 10px;
@@ -530,6 +548,24 @@ body {
   background: linear-gradient(135deg, rgba(93, 214, 255, 0.10), rgba(155, 123, 255, 0.14));
   box-shadow: 0 0 0 3px rgba(155, 123, 255, 0.10);
   pointer-events: none;
+}
+
+.snapFlash{
+  position:absolute;
+  top: 8px;
+  bottom: 8px;
+  width: 2px;
+  background: rgba(93, 214, 255, 0.92);
+  box-shadow: 0 0 18px rgba(93, 214, 255, 0.35);
+  border-radius: 2px;
+  transform: translateX(-1px);
+  pointer-events:none;
+  animation: snapPulse 220ms ease-out;
+}
+@keyframes snapPulse{
+  0%{ opacity: 0.0; }
+  20%{ opacity: 1.0; }
+  100%{ opacity: 0.0; }
 }
 
 .timelineTrack {

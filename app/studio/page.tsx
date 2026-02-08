@@ -45,6 +45,7 @@ export default function StudioPage() {
   const pendingSeekRef = useRef<PendingSeek | null>(null);
   const switchingRef = useRef(false);
   const currentDragRef = useRef<DragPayload | null>(null);
+  const altDownRef = useRef(false);
 
   const [assets, setAssets] = useState<Asset[]>([]);
   const assetsById = useMemo(() => new Map(assets.map((a) => [a.assetId, a])), [assets]);
@@ -78,6 +79,8 @@ export default function StudioPage() {
 
   const [playerSrc, setPlayerSrc] = useState<string | null>(null);
   const [timelineZoom, setTimelineZoom] = useState(1.6);
+  const [snappingEnabled, setSnappingEnabled] = useState(true);
+  const [altDown, setAltDown] = useState(false);
   const [isUploading, setIsUploading] = useState(false);
   const [uploadError, setUploadError] = useState<string | null>(null);
 
@@ -289,6 +292,27 @@ export default function StudioPage() {
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
   }, [timeline, selectedClipId]);
+
+  useEffect(() => {
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.key === "Alt") {
+        altDownRef.current = true;
+        setAltDown(true);
+      }
+    };
+    const onKeyUp = (e: KeyboardEvent) => {
+      if (e.key === "Alt") {
+        altDownRef.current = false;
+        setAltDown(false);
+      }
+    };
+    window.addEventListener("keydown", onKeyDown);
+    window.addEventListener("keyup", onKeyUp);
+    return () => {
+      window.removeEventListener("keydown", onKeyDown);
+      window.removeEventListener("keyup", onKeyUp);
+    };
+  }, []);
 
   // ---- Player helpers ----
   async function ensurePlayerOnAsset(asset: Asset, seekTo: number, play: boolean) {
@@ -644,22 +668,27 @@ export default function StudioPage() {
     const fg = videoRef.current;
     const playheadSourceTime =
       fg && asset && fg.currentSrc && fg.currentSrc.endsWith(asset.videoUrl) ? Number(fg.currentTime || 0) : null;
+    const doSnap = snappingEnabled && !altDownRef.current;
 
     let nextIn = clip.sourceIn;
     let nextOut = clip.sourceOut;
     const startOutBounded = Math.min(d.startOut, maxOut);
     if (d.handle === "in") {
       nextIn = clamp(d.startIn + delta, 0, startOutBounded - minLen);
-      nextIn = snapWithin(snapPoints, nextIn, snapThreshold, 0, startOutBounded - minLen);
-      if (playheadSourceTime != null && Math.abs(playheadSourceTime - nextIn) <= snapThreshold) {
-        nextIn = clamp(playheadSourceTime, 0, startOutBounded - minLen);
+      if (doSnap) {
+        nextIn = snapWithin(snapPoints, nextIn, snapThreshold, 0, startOutBounded - minLen);
+        if (playheadSourceTime != null && Math.abs(playheadSourceTime - nextIn) <= snapThreshold) {
+          nextIn = clamp(playheadSourceTime, 0, startOutBounded - minLen);
+        }
       }
     }
     if (d.handle === "out") {
       nextOut = clamp(d.startOut + delta, d.startIn + minLen, maxOut);
-      nextOut = snapWithin(snapPoints, nextOut, snapThreshold, d.startIn + minLen, maxOut);
-      if (playheadSourceTime != null && Math.abs(playheadSourceTime - nextOut) <= snapThreshold) {
-        nextOut = clamp(playheadSourceTime, d.startIn + minLen, maxOut);
+      if (doSnap) {
+        nextOut = snapWithin(snapPoints, nextOut, snapThreshold, d.startIn + minLen, maxOut);
+        if (playheadSourceTime != null && Math.abs(playheadSourceTime - nextOut) <= snapThreshold) {
+          nextOut = clamp(playheadSourceTime, d.startIn + minLen, maxOut);
+        }
       }
     }
 
@@ -1041,6 +1070,15 @@ export default function StudioPage() {
                 <span>Timeline</span>
               </div>
               <div className="timelineRight">
+                <button
+                  type="button"
+                  className={`snapBtn ${snappingEnabled ? "on" : "off"}`}
+                  onClick={() => setSnappingEnabled((s) => !s)}
+                  title={snappingEnabled ? "Snapping ON (hold Alt to disable)" : "Snapping OFF"}
+                  aria-pressed={snappingEnabled}
+                >
+                  Snap {snappingEnabled ? "On" : "Off"}
+                </button>
                 <label className="zoomCtl">
                   <span>Zoom</span>
                   <input
@@ -1063,6 +1101,8 @@ export default function StudioPage() {
               timeline={timeline}
               durationSeconds={duration}
               zoom={timelineZoom}
+              snappingEnabled={snappingEnabled}
+              altDown={altDown}
               offsets={offsets}
               selectedClipId={selectedClipId}
               playheadSeconds={playheadProjectTime}
@@ -1109,6 +1149,8 @@ function TimelineStrip({
   timeline,
   durationSeconds,
   zoom,
+  snappingEnabled,
+  altDown,
   offsets,
   selectedClipId,
   playheadSeconds,
@@ -1127,6 +1169,8 @@ function TimelineStrip({
   timeline: ProjectTimeline;
   durationSeconds: number;
   zoom: number;
+  snappingEnabled: boolean;
+  altDown: boolean;
   offsets: Map<string, number>;
   selectedClipId: string | null;
   playheadSeconds: number;
@@ -1147,6 +1191,7 @@ function TimelineStrip({
   const [dropPayload, setDropPayload] = useState<DragPayload | null>(null);
   const [draggingId, setDraggingId] = useState<string | null>(null);
   const dragDepthRef = useRef(0);
+  const [snapFlashAt, setSnapFlashAt] = useState<number | null>(null);
 
   function clientXToProjectTime(clientX: number) {
     const el = refEl.current;
@@ -1210,7 +1255,13 @@ function TimelineStrip({
 
   function snapProjectTime(t: number) {
     const thr = getSnapThresholdSeconds();
-    return snapNearest(projectBoundaries(), t, thr);
+    if (!snappingEnabled || altDown) return t;
+    const snapped = snapNearest(projectBoundaries(), t, thr);
+    if (Math.abs(snapped - t) > 0.001) {
+      setSnapFlashAt(snapped);
+      window.setTimeout(() => setSnapFlashAt((cur) => (cur === snapped ? null : cur)), 220);
+    }
+    return snapped;
   }
 
   return (
@@ -1361,6 +1412,13 @@ function TimelineStrip({
               />
             );
           })() : null}
+          {snapFlashAt != null ? (
+            <div
+              className="snapFlash"
+              style={{ left: pct(clamp(snapFlashAt / duration, 0, 1)) } as any}
+              aria-hidden="true"
+            />
+          ) : null}
         </div>
       </div>
     </div>
