@@ -44,6 +44,7 @@ export default function StudioPage() {
   const stripRef = useRef<HTMLDivElement | null>(null);
   const pendingSeekRef = useRef<PendingSeek | null>(null);
   const switchingRef = useRef(false);
+  const currentDragRef = useRef<DragPayload | null>(null);
 
   const [assets, setAssets] = useState<Asset[]>([]);
   const assetsById = useMemo(() => new Map(assets.map((a) => [a.assetId, a])), [assets]);
@@ -188,6 +189,18 @@ export default function StudioPage() {
     } catch {
       return null;
     }
+  }
+
+  function beginDrag(payload: DragPayload) {
+    currentDragRef.current = payload;
+  }
+
+  function endDrag() {
+    currentDragRef.current = null;
+  }
+
+  function getCurrentDrag() {
+    return currentDragRef.current;
   }
 
   // Keep the preview synced to the selected timeline clip (when we're not actively previewing playback).
@@ -756,7 +769,12 @@ export default function StudioPage() {
                     type="button"
                     className="binClip"
                     draggable
-                    onDragStart={(e) => setDragData(e, { kind: "asset", assetId: a.assetId })}
+                    onDragStart={(e) => {
+                      const payload: DragPayload = { kind: "asset", assetId: a.assetId };
+                      beginDrag(payload);
+                      setDragData(e, payload);
+                    }}
+                    onDragEnd={endDrag}
                     onClick={() => {
                       // Seek player to start of this asset for preview convenience.
                       ensurePlayerOnAsset(a, 0, false);
@@ -1028,6 +1046,9 @@ export default function StudioPage() {
                 return Math.max(0.2, c.sourceOut - c.sourceIn);
               }}
               getDragData={getDragData}
+              getCurrentDrag={getCurrentDrag}
+              onAnyDragStart={beginDrag}
+              onAnyDragEnd={endDrag}
             />
 
             <div className="timelineFooter">
@@ -1056,7 +1077,10 @@ function TimelineStrip({
   ,
   onDropPayload,
   getGhostLenSeconds,
-  getDragData
+  getDragData,
+  getCurrentDrag,
+  onAnyDragStart,
+  onAnyDragEnd
 }: {
   refEl: MutableRefObject<HTMLDivElement | null>;
   timeline: ProjectTimeline;
@@ -1071,6 +1095,9 @@ function TimelineStrip({
   onDropPayload: (payload: DragPayload, projectTime: number) => void;
   getGhostLenSeconds: (payload: DragPayload) => number | null;
   getDragData: (e: React.DragEvent) => DragPayload | null;
+  getCurrentDrag: () => DragPayload | null;
+  onAnyDragStart: (payload: DragPayload) => void;
+  onAnyDragEnd: () => void;
 }) {
   const duration = Math.max(0.001, durationSeconds || 0.001);
   const playheadX = clamp(playheadSeconds / duration, 0, 1);
@@ -1078,6 +1105,7 @@ function TimelineStrip({
   const [dropAt, setDropAt] = useState<number | null>(null);
   const [dropPayload, setDropPayload] = useState<DragPayload | null>(null);
   const [draggingId, setDraggingId] = useState<string | null>(null);
+  const dragDepthRef = useRef(0);
 
   function clientXToProjectTime(clientX: number) {
     const el = refEl.current;
@@ -1143,8 +1171,13 @@ function TimelineStrip({
         }}
         role="list"
         aria-label="Timeline strip"
+        onDragEnter={(e) => {
+          const payload = getCurrentDrag() || getDragData(e);
+          if (!payload) return;
+          dragDepthRef.current += 1;
+        }}
         onDragOver={(e) => {
-          const payload = getDragData(e);
+          const payload = getCurrentDrag() || getDragData(e);
           if (!payload) return;
           e.preventDefault();
           e.dataTransfer.dropEffect = payload.kind === "asset" ? "copy" : "move";
@@ -1152,21 +1185,31 @@ function TimelineStrip({
           setDropPayload(payload);
         }}
         onDragLeave={() => {
-          setDropAt(null);
-          setDropPayload(null);
+          dragDepthRef.current = Math.max(0, dragDepthRef.current - 1);
+          if (dragDepthRef.current === 0) {
+            setDropAt(null);
+            setDropPayload(null);
+          }
         }}
         onDrop={(e) => {
-          const payload = getDragData(e);
+          const payload = getCurrentDrag() || getDragData(e);
           if (!payload) return;
           e.preventDefault();
           const t = clientXToProjectTime(e.clientX);
           setDropAt(null);
           setDropPayload(null);
           setDraggingId(null);
+          dragDepthRef.current = 0;
           onDropPayload(payload, t);
+          onAnyDragEnd();
         }}
       >
         <div className="timelineStripInner" style={{ width: pct(zoom) } as any}>
+          {timeline.clips.length === 0 ? (
+            <div className="timelineEmptyDrop" aria-hidden="true">
+              Drop clips here
+            </div>
+          ) : null}
           {timeline.clips.map((c) => {
             const clipOffset = offsets.get(c.id) ?? 0;
             const len = Math.max(0.001, c.sourceOut - c.sourceIn);
@@ -1182,6 +1225,7 @@ function TimelineStrip({
                 title={`${c.label} (${fmt(len)})`}
                 draggable
                 onDragStart={(e) => {
+                  onAnyDragStart({ kind: "clip", clipId: c.id });
                   setDraggingId(c.id);
                   try {
                     const raw = JSON.stringify({ kind: "clip", clipId: c.id });
@@ -1190,7 +1234,10 @@ function TimelineStrip({
                     e.dataTransfer.effectAllowed = "move";
                   } catch {}
                 }}
-                onDragEnd={() => setDraggingId(null)}
+                onDragEnd={() => {
+                  setDraggingId(null);
+                  onAnyDragEnd();
+                }}
                 onPointerDown={(e) => {
                   e.stopPropagation();
                   onSelect(c.id);
