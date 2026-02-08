@@ -169,14 +169,17 @@ export default function StudioPage() {
 
   function setDragData(e: React.DragEvent, payload: DragPayload) {
     try {
-      e.dataTransfer.setData(DRAG_MIME, JSON.stringify(payload));
+      const raw = JSON.stringify(payload);
+      // Safari is picky about custom drag types; provide text/plain fallback.
+      e.dataTransfer.setData(DRAG_MIME, raw);
+      e.dataTransfer.setData("text/plain", raw);
       e.dataTransfer.effectAllowed = "copyMove";
     } catch {}
   }
 
   function getDragData(e: React.DragEvent): DragPayload | null {
     try {
-      const raw = e.dataTransfer.getData(DRAG_MIME);
+      const raw = e.dataTransfer.getData(DRAG_MIME) || e.dataTransfer.getData("text/plain");
       if (!raw) return null;
       const parsed = JSON.parse(raw) as DragPayload;
       if (parsed?.kind === "asset" && typeof parsed.assetId === "string") return parsed;
@@ -322,27 +325,13 @@ export default function StudioPage() {
     };
     setAssets((prev) => [...prev, asset]);
 
-    // Auto-add to project timeline like CapCut: import -> clip appears ready to edit.
-    if (durationSeconds > 0) {
-      const clip: ProjectClip = makeClipFromAsset(asset) ?? {
-        id: crypto.randomUUID(),
-        assetId: asset.assetId,
-        label: cleanName(asset.name),
-        sourceIn: 0,
-        sourceOut: durationSeconds
-      };
-      setTimeline((t) => ({ ...t, clips: [...t.clips, clip] }));
-      setSelectedClipId(clip.id);
-      await ensurePlayerOnAsset(asset, 0, false);
-    } else {
-      // If duration wasn't known (rare), still select player source.
-      setSelectedClipId(null);
-      await ensurePlayerOnAsset(asset, 0, false);
-    }
+    // Import should only add to the Library. The user explicitly adds to the timeline.
+    setSelectedClipId(null);
+    await ensurePlayerOnAsset(asset, 0, false);
 
     setChat((prev) => [
       ...prev,
-      { role: "ai", text: "Imported. Tell me what you’re making (Reels/TikTok/YouTube) and the vibe (hype/cinematic/clean)." }
+      { role: "ai", text: "Imported to Library. Drag it into the timeline (or hit +), then tell me the vibe." }
     ]);
   }
 
@@ -1032,6 +1021,12 @@ export default function StudioPage() {
                 if (payload.kind === "asset") await insertAssetAtTime(payload.assetId, t);
                 if (payload.kind === "clip") await reorderClipToTime(payload.clipId, t);
               }}
+              getGhostLenSeconds={(payload) => {
+                if (payload.kind === "asset") return assetsById.get(payload.assetId)?.durationSeconds ?? null;
+                const c = timeline.clips.find((x) => x.id === payload.clipId);
+                if (!c) return null;
+                return Math.max(0.2, c.sourceOut - c.sourceIn);
+              }}
               getDragData={getDragData}
             />
 
@@ -1060,6 +1055,7 @@ function TimelineStrip({
   onBeginDrag
   ,
   onDropPayload,
+  getGhostLenSeconds,
   getDragData
 }: {
   refEl: MutableRefObject<HTMLDivElement | null>;
@@ -1073,12 +1069,14 @@ function TimelineStrip({
   onScrub: (t: number, play: boolean) => void;
   onBeginDrag: (clipId: string, handle: "in" | "out", startX: number) => void;
   onDropPayload: (payload: DragPayload, projectTime: number) => void;
+  getGhostLenSeconds: (payload: DragPayload) => number | null;
   getDragData: (e: React.DragEvent) => DragPayload | null;
 }) {
   const duration = Math.max(0.001, durationSeconds || 0.001);
   const playheadX = clamp(playheadSeconds / duration, 0, 1);
   const scrubRef = useRef<null | { startX: number; moved: boolean }>(null);
   const [dropAt, setDropAt] = useState<number | null>(null);
+  const [dropPayload, setDropPayload] = useState<DragPayload | null>(null);
   const [draggingId, setDraggingId] = useState<string | null>(null);
 
   function clientXToProjectTime(clientX: number) {
@@ -1088,6 +1086,32 @@ function TimelineStrip({
     const xPx = (clientX - rect.left) + (el.scrollLeft || 0);
     const x = clamp(xPx / Math.max(1, el.scrollWidth || rect.width), 0, 1);
     return x * duration;
+  }
+
+  function computeDropIndex(t: number) {
+    const tt = clamp(t, 0, duration);
+    let acc = 0;
+    for (let i = 0; i < timeline.clips.length; i++) {
+      const c = timeline.clips[i];
+      const len = Math.max(0, c.sourceOut - c.sourceIn);
+      const start = acc;
+      const end = acc + len;
+      if (tt >= start && tt <= end) {
+        const before = tt - start;
+        const after = end - tt;
+        return before <= after ? i : i + 1;
+      }
+      acc = end;
+    }
+    return timeline.clips.length;
+  }
+
+  function indexToLeftSeconds(idx: number) {
+    if (timeline.clips.length === 0) return 0;
+    if (idx <= 0) return 0;
+    if (idx >= timeline.clips.length) return duration;
+    const id = timeline.clips[idx].id;
+    return offsets.get(id) ?? 0;
   }
 
   return (
@@ -1125,14 +1149,19 @@ function TimelineStrip({
           e.preventDefault();
           e.dataTransfer.dropEffect = payload.kind === "asset" ? "copy" : "move";
           setDropAt(clientXToProjectTime(e.clientX));
+          setDropPayload(payload);
         }}
-        onDragLeave={() => setDropAt(null)}
+        onDragLeave={() => {
+          setDropAt(null);
+          setDropPayload(null);
+        }}
         onDrop={(e) => {
           const payload = getDragData(e);
           if (!payload) return;
           e.preventDefault();
           const t = clientXToProjectTime(e.clientX);
           setDropAt(null);
+          setDropPayload(null);
           setDraggingId(null);
           onDropPayload(payload, t);
         }}
@@ -1155,7 +1184,9 @@ function TimelineStrip({
                 onDragStart={(e) => {
                   setDraggingId(c.id);
                   try {
-                    e.dataTransfer.setData(DRAG_MIME, JSON.stringify({ kind: "clip", clipId: c.id }));
+                    const raw = JSON.stringify({ kind: "clip", clipId: c.id });
+                    e.dataTransfer.setData(DRAG_MIME, raw);
+                    e.dataTransfer.setData("text/plain", raw);
                     e.dataTransfer.effectAllowed = "move";
                   } catch {}
                 }}
@@ -1196,6 +1227,22 @@ function TimelineStrip({
           {dropAt != null ? (
             <div className="dropMarker" style={{ left: pct(clamp(dropAt / duration, 0, 1)) } as any} aria-hidden="true" />
           ) : null}
+          {dropAt != null && dropPayload ? (() => {
+            const len = getGhostLenSeconds(dropPayload);
+            if (!len || !Number.isFinite(len) || len <= 0) return null;
+            const idx = computeDropIndex(dropAt);
+            const leftSeconds = indexToLeftSeconds(idx);
+            const left = clamp(leftSeconds / duration, 0, 1);
+            // When the timeline is empty, treat the ghost as a medium-size block.
+            const width = timeline.clips.length === 0 ? 0.35 : clamp(len / duration, 0.01, 0.9);
+            return (
+              <div
+                className="ghostClip"
+                style={{ left: pct(left), width: pct(width) } as any}
+                aria-hidden="true"
+              />
+            );
+          })() : null}
         </div>
       </div>
     </div>

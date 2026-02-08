@@ -507,6 +507,17 @@ body {
   background: rgba(155, 123, 255, 0.92);
 }
 
+.ghostClip{
+  position: absolute;
+  top: 14px;
+  bottom: 14px;
+  border-radius: 14px;
+  border: 1px dashed rgba(155, 123, 255, 0.55);
+  background: linear-gradient(135deg, rgba(93, 214, 255, 0.10), rgba(155, 123, 255, 0.14));
+  box-shadow: 0 0 0 3px rgba(155, 123, 255, 0.10);
+  pointer-events: none;
+}
+
 .timelineTrack {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
