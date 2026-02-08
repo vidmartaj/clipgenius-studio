@@ -44,6 +44,7 @@ export default function StudioPage() {
   const [selectedClipId, setSelectedClipId] = useState<string | null>(null);
 
   const [playerSrc, setPlayerSrc] = useState<string | null>(null);
+  const [timelineZoom, setTimelineZoom] = useState(1.6);
   const [isUploading, setIsUploading] = useState(false);
   const [uploadError, setUploadError] = useState<string | null>(null);
 
@@ -60,6 +61,19 @@ export default function StudioPage() {
     { role: "ai", text: "Upload clips and I’ll draft a highlight timeline. Then tell me how to improve it." }
   ]);
 
+  // ---- Preview playback across multiple assets ----
+  const previewRef = useRef<{
+    enabled: boolean;
+    mode: "sequence" | "single";
+    idx: number;
+    clipId: string | null;
+    clipOffset: number;
+    stopAtSourceOut: number;
+  }>({ enabled: false, mode: "sequence", idx: 0, clipId: null, clipOffset: 0, stopAtSourceOut: 0 });
+
+  const [isPreviewing, setIsPreviewing] = useState(false);
+  const [playheadProjectTime, setPlayheadProjectTime] = useState(0);
+
   const duration = useMemo(() => projectDurationSeconds(timeline), [timeline]);
   const offsets = useMemo(() => projectClipOffsets(timeline), [timeline]);
 
@@ -72,6 +86,13 @@ export default function StudioPage() {
     if (!selectedClip) return null;
     return assetsById.get(selectedClip.assetId) ?? null;
   }, [assetsById, selectedClip]);
+
+  // Keep the preview synced to the selected timeline clip (when we're not actively previewing playback).
+  useEffect(() => {
+    if (!selectedClip || !selectedAsset) return;
+    if (previewRef.current.enabled) return;
+    void ensurePlayerOnAsset(selectedAsset, selectedClip.sourceIn, false);
+  }, [selectedClipId, selectedAsset?.assetId]);
 
   // ---- Undo / redo ----
   function applyWithHistory(next: { timeline: ProjectTimeline; selectedClipId: string | null }) {
@@ -130,12 +151,12 @@ export default function StudioPage() {
 
   // ---- Player helpers ----
   async function ensurePlayerOnAsset(asset: Asset, seekTo: number, play: boolean) {
-    const v = videoRef.current;
-    if (!v) return;
-
     const nextSrc = asset.videoUrl;
     pendingSeekRef.current = { expectedSrc: nextSrc, time: seekTo, play };
     setPlayerSrc(nextSrc);
+
+    const v = videoRef.current;
+    if (!v) return;
 
     // If src already matches, onLoadedMetadata may not fire; seek immediately.
     if (v.currentSrc && v.currentSrc.endsWith(nextSrc)) {
@@ -320,19 +341,6 @@ export default function StudioPage() {
     }
   }
 
-  // ---- Preview playback across multiple assets ----
-  const previewRef = useRef<{
-    enabled: boolean;
-    mode: "sequence" | "single";
-    idx: number;
-    clipId: string | null;
-    clipOffset: number;
-    stopAtSourceOut: number;
-  }>({ enabled: false, mode: "sequence", idx: 0, clipId: null, clipOffset: 0, stopAtSourceOut: 0 });
-
-  const [isPreviewing, setIsPreviewing] = useState(false);
-  const [playheadProjectTime, setPlayheadProjectTime] = useState(0);
-
   async function startClipPlayback(clip: ProjectClip, clipIndex: number, mode: "sequence" | "single") {
     const asset = assetsById.get(clip.assetId);
     if (!asset) return;
@@ -434,8 +442,7 @@ export default function StudioPage() {
     const el = stripRef.current;
     const clip = timeline.clips.find((c) => c.id === clipId);
     if (!el || !clip) return;
-    const rect = el.getBoundingClientRect();
-    const secondsPerPx = duration / Math.max(1, rect.width);
+    const secondsPerPx = duration / Math.max(1, el.scrollWidth || el.getBoundingClientRect().width);
     dragRef.current = {
       clipId,
       handle,
@@ -608,6 +615,8 @@ export default function StudioPage() {
                         sourceOut: a.durationSeconds
                       };
                       applyWithHistory({ timeline: { ...timeline, clips: [...timeline.clips, clip] }, selectedClipId: clip.id });
+                      // Immediately show this clip in the preview (without starting playback).
+                      void ensurePlayerOnAsset(a, 0, false);
                     }}
                   >
                     +
@@ -757,13 +766,29 @@ export default function StudioPage() {
                 <span className="spark" aria-hidden="true">✦</span>
                 <span>Timeline</span>
               </div>
-              <div className="timelineMeta">{duration ? fmt(duration) : "—"}</div>
+              <div className="timelineRight">
+                <label className="zoomCtl">
+                  <span>Zoom</span>
+                  <input
+                    type="range"
+                    min={1}
+                    max={4}
+                    step={0.1}
+                    value={timelineZoom}
+                    onChange={(e) => setTimelineZoom(Number(e.target.value))}
+                    aria-label="Timeline zoom"
+                  />
+                  <span className="zoomVal">{timelineZoom.toFixed(1)}×</span>
+                </label>
+                <div className="timelineMeta">{duration ? fmt(duration) : "—"}</div>
+              </div>
             </div>
 
             <TimelineStrip
               refEl={stripRef}
               timeline={timeline}
               durationSeconds={duration}
+              zoom={timelineZoom}
               offsets={offsets}
               selectedClipId={selectedClipId}
               playheadSeconds={playheadProjectTime}
@@ -795,6 +820,7 @@ function TimelineStrip({
   refEl,
   timeline,
   durationSeconds,
+  zoom,
   offsets,
   selectedClipId,
   playheadSeconds,
@@ -805,6 +831,7 @@ function TimelineStrip({
   refEl: MutableRefObject<HTMLDivElement | null>;
   timeline: ProjectTimeline;
   durationSeconds: number;
+  zoom: number;
   offsets: Map<string, number>;
   selectedClipId: string | null;
   playheadSeconds: number;
@@ -824,54 +851,57 @@ function TimelineStrip({
           const el = refEl.current;
           if (!el) return;
           const rect = el.getBoundingClientRect();
-          const x = clamp((e.clientX - rect.left) / Math.max(1, rect.width), 0, 1);
+          const xPx = (e.clientX - rect.left) + (el.scrollLeft || 0);
+          const x = clamp(xPx / Math.max(1, el.scrollWidth || rect.width), 0, 1);
           onScrub(x * duration);
         }}
         role="list"
         aria-label="Timeline strip"
       >
-        {timeline.clips.map((c) => {
-          const clipOffset = offsets.get(c.id) ?? 0;
-          const len = Math.max(0.001, c.sourceOut - c.sourceIn);
-          const left = clamp(clipOffset / duration, 0, 1);
-          const width = clamp(len / duration, 0.002, 1);
-          const isSelected = c.id === selectedClipId;
-          return (
-            <div
-              key={c.id}
-              className={`tlClip ${isSelected ? "isSelected" : ""}`}
-              style={{ left: pct(left), width: pct(width) } as any}
-              role="listitem"
-              title={`${c.label} (${fmt(len)})`}
-              onPointerDown={(e) => {
-                e.stopPropagation();
-                onSelect(c.id);
-              }}
-            >
+        <div className="timelineStripInner" style={{ width: pct(zoom) } as any}>
+          {timeline.clips.map((c) => {
+            const clipOffset = offsets.get(c.id) ?? 0;
+            const len = Math.max(0.001, c.sourceOut - c.sourceIn);
+            const left = clamp(clipOffset / duration, 0, 1);
+            const width = clamp(len / duration, 0.002, 1);
+            const isSelected = c.id === selectedClipId;
+            return (
               <div
-                className="tlHandle left"
+                key={c.id}
+                className={`tlClip ${isSelected ? "isSelected" : ""}`}
+                style={{ left: pct(left), width: pct(width) } as any}
+                role="listitem"
+                title={`${c.label} (${fmt(len)})`}
                 onPointerDown={(e) => {
                   e.stopPropagation();
                   onSelect(c.id);
-                  onBeginDrag(c.id, "in", e.clientX);
                 }}
-                aria-label="Trim in"
-              />
-              <div className="tlLabel">{c.label}</div>
-              <div
-                className="tlHandle right"
-                onPointerDown={(e) => {
-                  e.stopPropagation();
-                  onSelect(c.id);
-                  onBeginDrag(c.id, "out", e.clientX);
-                }}
-                aria-label="Trim out"
-              />
-            </div>
-          );
-        })}
+              >
+                <div
+                  className="tlHandle left"
+                  onPointerDown={(e) => {
+                    e.stopPropagation();
+                    onSelect(c.id);
+                    onBeginDrag(c.id, "in", e.clientX);
+                  }}
+                  aria-label="Trim in"
+                />
+                <div className="tlLabel">{c.label}</div>
+                <div
+                  className="tlHandle right"
+                  onPointerDown={(e) => {
+                    e.stopPropagation();
+                    onSelect(c.id);
+                    onBeginDrag(c.id, "out", e.clientX);
+                  }}
+                  aria-label="Trim out"
+                />
+              </div>
+            );
+          })}
 
-        <div className="playhead" style={{ left: pct(playheadX) } as any} aria-hidden="true" />
+          <div className="playhead" style={{ left: pct(playheadX) } as any} aria-hidden="true" />
+        </div>
       </div>
     </div>
   );

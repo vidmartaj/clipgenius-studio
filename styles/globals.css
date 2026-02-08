@@ -338,6 +338,28 @@ body {
 .timelineTitle { display: inline-flex; gap: 10px; align-items: center; font-weight: 800; }
 .spark { color: rgba(93, 214, 255, 0.95); }
 .timelineMeta { color: var(--muted); font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace; font-size: 12px; }
+.timelineRight{
+  display: inline-flex;
+  align-items: center;
+  gap: 14px;
+}
+.zoomCtl{
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 800;
+}
+.zoomCtl span{ white-space: nowrap; }
+.zoomCtl input[type="range"]{
+  width: 140px;
+  accent-color: rgba(93, 214, 255, 0.95);
+}
+.zoomVal{
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
+  color: rgba(242,245,255,0.76);
+}
 
 .timelineStripWrap{
   display:grid;
@@ -350,7 +372,14 @@ body {
   border-radius: 18px;
   border: 1px solid rgba(255,255,255,0.08);
   background: rgba(255,255,255,0.02);
-  overflow: hidden;
+  overflow-x: auto;
+  overflow-y: hidden;
+}
+
+.timelineStripInner{
+  position: relative;
+  height: 120px;
+  min-width: 100%;
 }
 
 .tlClip{
