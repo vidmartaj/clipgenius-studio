@@ -48,6 +48,30 @@ export default function StudioPage() {
 
   const [assets, setAssets] = useState<Asset[]>([]);
   const assetsById = useMemo(() => new Map(assets.map((a) => [a.assetId, a])), [assets]);
+  const snapPointsByAssetId = useMemo(() => {
+    const map = new Map<string, number[]>();
+    for (const a of assets) {
+      const pts: number[] = [];
+      if (Number.isFinite(a.durationSeconds) && a.durationSeconds > 0) {
+        pts.push(0, a.durationSeconds);
+      }
+      if (a.analysis?.clips?.length) {
+        for (const c of a.analysis.clips) {
+          if (Number.isFinite(c.start)) pts.push(c.start);
+          if (Number.isFinite(c.end)) pts.push(c.end);
+        }
+      }
+      pts.sort((x, y) => x - y);
+      // De-dupe (with small epsilon).
+      const out: number[] = [];
+      const eps = 0.01;
+      for (const p of pts) {
+        if (out.length === 0 || Math.abs(p - out[out.length - 1]) > eps) out.push(p);
+      }
+      map.set(a.assetId, out);
+    }
+    return map;
+  }, [assets]);
 
   const [timeline, setTimeline] = useState<ProjectTimeline>({ projectId: "local", clips: [] });
   const [selectedClipId, setSelectedClipId] = useState<string | null>(null);
@@ -615,12 +639,29 @@ export default function StudioPage() {
     const dx = clientX - d.startX;
     const delta = dx * d.secondsPerPx;
     const minLen = 0.2;
+    const snapThreshold = clamp(d.secondsPerPx * 10, 0.06, 0.35);
+    const snapPoints = snapPointsByAssetId.get(clip.assetId);
+    const fg = videoRef.current;
+    const playheadSourceTime =
+      fg && asset && fg.currentSrc && fg.currentSrc.endsWith(asset.videoUrl) ? Number(fg.currentTime || 0) : null;
 
     let nextIn = clip.sourceIn;
     let nextOut = clip.sourceOut;
     const startOutBounded = Math.min(d.startOut, maxOut);
-    if (d.handle === "in") nextIn = clamp(d.startIn + delta, 0, startOutBounded - minLen);
-    if (d.handle === "out") nextOut = clamp(d.startOut + delta, d.startIn + minLen, maxOut);
+    if (d.handle === "in") {
+      nextIn = clamp(d.startIn + delta, 0, startOutBounded - minLen);
+      nextIn = snapWithin(snapPoints, nextIn, snapThreshold, 0, startOutBounded - minLen);
+      if (playheadSourceTime != null && Math.abs(playheadSourceTime - nextIn) <= snapThreshold) {
+        nextIn = clamp(playheadSourceTime, 0, startOutBounded - minLen);
+      }
+    }
+    if (d.handle === "out") {
+      nextOut = clamp(d.startOut + delta, d.startIn + minLen, maxOut);
+      nextOut = snapWithin(snapPoints, nextOut, snapThreshold, d.startIn + minLen, maxOut);
+      if (playheadSourceTime != null && Math.abs(playheadSourceTime - nextOut) <= snapThreshold) {
+        nextOut = clamp(playheadSourceTime, d.startIn + minLen, maxOut);
+      }
+    }
 
     d.didMove = true;
     // Live update without pushing undo history for every tick.
@@ -1142,6 +1183,36 @@ function TimelineStrip({
     return offsets.get(id) ?? 0;
   }
 
+  function getSnapThresholdSeconds() {
+    const el = refEl.current;
+    const px = el ? Math.max(1, el.scrollWidth || el.clientWidth) : 1;
+    const secondsPerPx = duration / px;
+    return clamp(secondsPerPx * 10, 0.06, 0.35);
+  }
+
+  function projectBoundaries() {
+    const out: number[] = [0, duration];
+    for (const c of timeline.clips) {
+      const start = offsets.get(c.id) ?? 0;
+      const len = Math.max(0, c.sourceOut - c.sourceIn);
+      out.push(start);
+      out.push(start + len);
+    }
+    out.sort((a, b) => a - b);
+    // De-dupe small.
+    const dedup: number[] = [];
+    const eps = 0.01;
+    for (const t of out) {
+      if (dedup.length === 0 || Math.abs(t - dedup[dedup.length - 1]) > eps) dedup.push(t);
+    }
+    return dedup;
+  }
+
+  function snapProjectTime(t: number) {
+    const thr = getSnapThresholdSeconds();
+    return snapNearest(projectBoundaries(), t, thr);
+  }
+
   return (
     <div className="timelineStripWrap">
       <div
@@ -1181,7 +1252,7 @@ function TimelineStrip({
           if (!payload) return;
           e.preventDefault();
           e.dataTransfer.dropEffect = payload.kind === "asset" ? "copy" : "move";
-          setDropAt(clientXToProjectTime(e.clientX));
+          setDropAt(snapProjectTime(clientXToProjectTime(e.clientX)));
           setDropPayload(payload);
         }}
         onDragLeave={() => {
@@ -1195,7 +1266,7 @@ function TimelineStrip({
           const payload = getCurrentDrag() || getDragData(e);
           if (!payload) return;
           e.preventDefault();
-          const t = clientXToProjectTime(e.clientX);
+          const t = snapProjectTime(clientXToProjectTime(e.clientX));
           setDropAt(null);
           setDropPayload(null);
           setDraggingId(null);
@@ -1326,4 +1397,36 @@ function clamp(n: number, a: number, b: number) {
 
 function pct(n: number) {
   return `${(n * 100).toFixed(3)}%`;
+}
+
+function snapWithin(points: number[] | undefined, value: number, threshold: number, min: number, max: number) {
+  const snapped = snapNearest(points, value, threshold);
+  if (snapped < min || snapped > max) return value;
+  return snapped;
+}
+
+function snapNearest(points: number[] | undefined, value: number, threshold: number) {
+  if (!points || points.length === 0) return value;
+  // Binary search for insertion point.
+  let lo = 0;
+  let hi = points.length - 1;
+  while (lo <= hi) {
+    const mid = (lo + hi) >> 1;
+    const m = points[mid];
+    if (m < value) lo = mid + 1;
+    else hi = mid - 1;
+  }
+  const cand: number[] = [];
+  if (lo < points.length) cand.push(points[lo]);
+  if (lo - 1 >= 0) cand.push(points[lo - 1]);
+  let best = value;
+  let bestDist = threshold + 1;
+  for (const c of cand) {
+    const d = Math.abs(c - value);
+    if (d < bestDist) {
+      bestDist = d;
+      best = c;
+    }
+  }
+  return bestDist <= threshold ? best : value;
 }
