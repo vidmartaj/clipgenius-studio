@@ -134,8 +134,7 @@ async function getVideoStreamInfo(filePath: string) {
       "error",
       "-select_streams",
       "v:0",
-      "-show_entries",
-      "stream=width,height:stream_tags=rotate:side_data_list=rotation",
+      "-show_streams",
       "-of",
       "json",
       filePath
@@ -198,6 +197,8 @@ async function normalizeRotation(src: string, dst: string, rotationDegrees: numb
       "aac",
       "-b:a",
       "128k",
+      "-metadata:s:v:0",
+      "rotate=0",
       "-movflags",
       "+faststart",
       dst

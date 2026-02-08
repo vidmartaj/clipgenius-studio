@@ -282,7 +282,9 @@ export default function StudioPage() {
   function setInToPlayhead() {
     const v = videoRef.current;
     if (!v || !selectedClip) return;
-    const t = clamp(v.currentTime || 0, 0, selectedClip.sourceOut - 0.2);
+    const maxOut = selectedAsset?.durationSeconds || selectedClip.sourceOut;
+    const safeOut = Math.min(selectedClip.sourceOut, maxOut);
+    const t = clamp(v.currentTime || 0, 0, safeOut - 0.2);
     const next = updateClipById(timeline, selectedClip.id, { sourceIn: t });
     applyWithHistory({ timeline: next, selectedClipId: selectedClip.id });
   }
@@ -290,7 +292,8 @@ export default function StudioPage() {
   function setOutToPlayhead() {
     const v = videoRef.current;
     if (!v || !selectedClip) return;
-    const t = clamp(v.currentTime || 0, selectedClip.sourceIn + 0.2, selectedClip.sourceOut + 10_000);
+    const maxOut = selectedAsset?.durationSeconds || selectedClip.sourceOut;
+    const t = clamp(v.currentTime || 0, selectedClip.sourceIn + 0.2, maxOut);
     const next = updateClipById(timeline, selectedClip.id, { sourceOut: Math.max(t, selectedClip.sourceIn + 0.2) });
     applyWithHistory({ timeline: next, selectedClipId: selectedClip.id });
   }
@@ -390,7 +393,7 @@ export default function StudioPage() {
 
     const epsilon = 0.05;
 
-    const onTimeUpdate = async () => {
+    const onTimeUpdateAsync = async () => {
       const state = previewRef.current;
       if (!state.enabled) {
         // When not in preview mode, map playhead to the currently selected clip (if any).
@@ -433,11 +436,12 @@ export default function StudioPage() {
       }
     };
 
-    v.addEventListener("timeupdate", () => void onTimeUpdate());
+    const onTimeUpdate = () => void onTimeUpdateAsync();
+    v.addEventListener("timeupdate", onTimeUpdate);
     v.addEventListener("ended", stopPreview);
     return () => {
       v.removeEventListener("ended", stopPreview);
-      // timeupdate listener uses inline wrapper; acceptable for MVP.
+      v.removeEventListener("timeupdate", onTimeUpdate);
     };
   }, [timeline, duration, offsets, assetsById]);
 
@@ -475,14 +479,17 @@ export default function StudioPage() {
     if (!d) return;
     const clip = timeline.clips.find((c) => c.id === d.clipId);
     if (!clip) return;
+    const asset = assetsById.get(clip.assetId);
+    const maxOut = asset?.durationSeconds || Number.POSITIVE_INFINITY;
     const dx = clientX - d.startX;
     const delta = dx * d.secondsPerPx;
     const minLen = 0.2;
 
     let nextIn = clip.sourceIn;
     let nextOut = clip.sourceOut;
-    if (d.handle === "in") nextIn = clamp(d.startIn + delta, 0, d.startOut - minLen);
-    if (d.handle === "out") nextOut = Math.max(d.startIn + minLen, d.startOut + delta);
+    const startOutBounded = Math.min(d.startOut, maxOut);
+    if (d.handle === "in") nextIn = clamp(d.startIn + delta, 0, startOutBounded - minLen);
+    if (d.handle === "out") nextOut = clamp(d.startOut + delta, d.startIn + minLen, maxOut);
 
     d.didMove = true;
     // Live update without pushing undo history for every tick.
@@ -515,6 +522,7 @@ export default function StudioPage() {
   async function scrubToProjectTime(projectTime: number, play: boolean) {
     if (timeline.clips.length === 0) return;
     const t = clamp(projectTime, 0, duration);
+    setPlayheadProjectTime(t);
     let acc = 0;
     for (let i = 0; i < timeline.clips.length; i++) {
       const c = timeline.clips[i];
