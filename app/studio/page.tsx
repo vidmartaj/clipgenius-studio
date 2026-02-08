@@ -88,6 +88,24 @@ export default function StudioPage() {
     return assetsById.get(selectedClip.assetId) ?? null;
   }, [assetsById, selectedClip]);
 
+  function sanitizeTimelineIfNeeded(t: ProjectTimeline) {
+    if (t.clips.length === 0) return t;
+    const minLen = 0.2;
+    let changed = false;
+    const clips = t.clips.map((c) => {
+      const asset = assetsById.get(c.assetId);
+      const maxOut = asset?.durationSeconds || 0;
+      if (!maxOut || !Number.isFinite(maxOut) || maxOut <= 0) return c;
+
+      const sourceIn = clamp(c.sourceIn, 0, Math.max(0, maxOut - minLen));
+      const sourceOut = clamp(c.sourceOut, sourceIn + minLen, maxOut);
+      if (sourceIn === c.sourceIn && sourceOut === c.sourceOut) return c;
+      changed = true;
+      return { ...c, sourceIn, sourceOut };
+    });
+    return changed ? { ...t, clips } : t;
+  }
+
   // Keep the preview synced to the selected timeline clip (when we're not actively previewing playback).
   useEffect(() => {
     if (!selectedClip || !selectedAsset) return;
@@ -97,9 +115,10 @@ export default function StudioPage() {
 
   // ---- Undo / redo ----
   function applyWithHistory(next: { timeline: ProjectTimeline; selectedClipId: string | null }) {
+    const sanitized = sanitizeTimelineIfNeeded(next.timeline);
     setPast((p) => [...p, { timeline, selectedClipId }].slice(-80));
     setFuture([]);
-    setTimeline(next.timeline);
+    setTimeline(sanitized);
     setSelectedClipId(next.selectedClipId);
     setExportUrl(null);
     setExportError(null);
@@ -361,6 +380,7 @@ export default function StudioPage() {
     const asset = assetsById.get(clip.assetId);
     if (!asset) return;
     const clipOffset = offsets.get(clip.id) ?? 0;
+    setSelectedClipId(clip.id);
     previewRef.current = {
       enabled: true,
       mode,
@@ -370,6 +390,7 @@ export default function StudioPage() {
       stopAtSourceOut: clip.sourceOut
     };
     setIsPreviewing(true);
+    setPlayheadProjectTime(clamp(clipOffset, 0, Math.max(0.001, duration)));
     await ensurePlayerOnAsset(asset, clip.sourceIn, true);
   }
 
@@ -444,6 +465,18 @@ export default function StudioPage() {
       v.removeEventListener("timeupdate", onTimeUpdate);
     };
   }, [timeline, duration, offsets, assetsById]);
+
+  // Keep playhead visible while playing through the timeline.
+  useEffect(() => {
+    const el = stripRef.current;
+    if (!el) return;
+    if (!previewRef.current.enabled) return;
+    if (dragRef.current) return;
+    const d = Math.max(0.001, duration || 0.001);
+    const x = (playheadProjectTime / d) * (el.scrollWidth || el.clientWidth);
+    const target = clamp(x - el.clientWidth * 0.35, 0, Math.max(0, (el.scrollWidth || 0) - el.clientWidth));
+    el.scrollLeft = target;
+  }, [playheadProjectTime, duration, timelineZoom]);
 
   // ---- Timeline strip drag trimming ----
   const dragRef = useRef<null | {
@@ -540,7 +573,16 @@ export default function StudioPage() {
           if (v) v.pause();
           const bg = bgVideoRef.current;
           if (bg) bg.pause();
-          await ensurePlayerOnAsset(asset, c.sourceIn + within, false);
+          // Avoid reloading sources on every mouse move: seek directly when possible.
+          const seekTo = c.sourceIn + within;
+          const fg = videoRef.current;
+          const bg2 = bgVideoRef.current;
+          if (fg && fg.currentSrc && fg.currentSrc.endsWith(asset.videoUrl)) {
+            fg.currentTime = clamp(seekTo, 0, Number.isFinite(fg.duration) ? fg.duration : seekTo);
+            if (bg2) bg2.currentTime = clamp(seekTo, 0, Number.isFinite(bg2.duration) ? bg2.duration : seekTo);
+            return;
+          }
+          await ensurePlayerOnAsset(asset, seekTo, false);
           return;
         }
 
@@ -695,8 +737,31 @@ export default function StudioPage() {
                           bg.currentTime = fg.currentTime || 0;
                         }
                       }}
-                      onPlay={() => bgVideoRef.current?.play().catch(() => {})}
-                      onPause={() => bgVideoRef.current?.pause()}
+                      onPlay={() => {
+                        // If the user hits play in the native controls, keep playback in "project timeline" mode.
+                        if (!previewRef.current.enabled && timeline.clips.length) {
+                          const idx = selectedClipId ? timeline.clips.findIndex((c) => c.id === selectedClipId) : 0;
+                          const i = idx >= 0 ? idx : 0;
+                          const c = timeline.clips[i];
+                          const off = offsets.get(c.id) ?? 0;
+                          previewRef.current = {
+                            enabled: true,
+                            mode: "sequence",
+                            idx: i,
+                            clipId: c.id,
+                            clipOffset: off,
+                            stopAtSourceOut: c.sourceOut
+                          };
+                          setIsPreviewing(true);
+                        }
+                        bgVideoRef.current?.play().catch(() => {});
+                      }}
+                      onPause={() => {
+                        // Pause should pause timeline playback as well (without resetting state).
+                        previewRef.current.enabled = false;
+                        setIsPreviewing(false);
+                        bgVideoRef.current?.pause();
+                      }}
                     />
                   </div>
                 ) : (
