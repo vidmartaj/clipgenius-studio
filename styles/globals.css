@@ -419,7 +419,7 @@ body {
 
 .timelineStrip{
   position: relative;
-  height: 120px;
+  height: 188px;
   border-radius: 18px;
   border: 1px solid rgba(255,255,255,0.08);
   background: rgba(255,255,255,0.02);
@@ -429,8 +429,26 @@ body {
 
 .timelineStripInner{
   position: relative;
-  height: 120px;
+  height: 188px;
   min-width: 100%;
+  padding: 10px;
+  display: grid;
+  grid-template-rows: 1fr 1fr;
+  gap: 10px;
+}
+
+.lane{
+  position: relative;
+  border-radius: 16px;
+  border: 1px solid rgba(255,255,255,0.06);
+  background: rgba(255,255,255,0.015);
+  overflow: hidden;
+}
+.laneVideo{
+  background: rgba(93, 214, 255, 0.03);
+}
+.laneAudio{
+  background: rgba(155, 123, 255, 0.03);
 }
 
 .timelineEmptyDrop{
@@ -449,8 +467,8 @@ body {
 
 .tlClip{
   position: absolute;
-  top: 14px;
-  bottom: 14px;
+  top: 10px;
+  bottom: 10px;
   border-radius: 14px;
   border: 1px solid rgba(255,255,255,0.10);
   background: rgba(255,255,255,0.03);
@@ -503,6 +521,7 @@ body {
   border-radius: 2px;
   transform: translateX(-1px);
   pointer-events:none;
+  z-index: 5;
 }
 .playhead::before{
   content:"";
@@ -526,6 +545,7 @@ body {
   border-radius: 2px;
   transform: translateX(-1px);
   pointer-events:none;
+  z-index: 6;
 }
 .dropMarker::before{
   content:"";
@@ -541,13 +561,14 @@ body {
 
 .ghostClip{
   position: absolute;
-  top: 14px;
-  bottom: 14px;
+  top: 10px;
+  bottom: 10px;
   border-radius: 14px;
   border: 1px dashed rgba(155, 123, 255, 0.55);
   background: linear-gradient(135deg, rgba(93, 214, 255, 0.10), rgba(155, 123, 255, 0.14));
   box-shadow: 0 0 0 3px rgba(155, 123, 255, 0.10);
   pointer-events: none;
+  z-index: 4;
 }
 
 .snapFlash{
@@ -561,11 +582,32 @@ body {
   transform: translateX(-1px);
   pointer-events:none;
   animation: snapPulse 220ms ease-out;
+  z-index: 7;
 }
 @keyframes snapPulse{
   0%{ opacity: 0.0; }
   20%{ opacity: 1.0; }
   100%{ opacity: 0.0; }
+}
+
+.audioClip{
+  position: absolute;
+  top: 10px;
+  bottom: 10px;
+  border-radius: 14px;
+  border: 1px solid rgba(255,255,255,0.10);
+  background: rgba(255,255,255,0.02);
+  opacity: 0.9;
+}
+.audioClip.has{
+  border-color: rgba(93, 214, 255, 0.18);
+  background-color: rgba(93, 214, 255, 0.05);
+  background-blend-mode: screen;
+  filter: saturate(1.05);
+}
+.audioClip.none{
+  border-style: dashed;
+  opacity: 0.55;
 }
 
 .timelineTrack {

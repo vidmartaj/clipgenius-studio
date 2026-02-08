@@ -17,6 +17,8 @@ type Asset = {
   name: string;
   videoUrl: string;
   durationSeconds: number;
+  hasAudio: boolean;
+  waveformUrl: string | null;
   analysis: AnalysisTimeline | null;
 };
 
@@ -371,6 +373,8 @@ export default function StudioPage() {
     const data = (await res.json()) as {
       assetId: string;
       videoUrl: string;
+      hasAudio?: boolean;
+      waveformUrl?: string | null;
       analysis?: AnalysisTimeline | null;
     };
 
@@ -382,6 +386,8 @@ export default function StudioPage() {
       name: file.name || "Untitled",
       videoUrl: data.videoUrl,
       durationSeconds,
+      hasAudio: Boolean(data.hasAudio),
+      waveformUrl: data.waveformUrl ?? null,
       analysis
     };
     setAssets((prev) => [...prev, asset]);
@@ -1103,6 +1109,7 @@ export default function StudioPage() {
               zoom={timelineZoom}
               snappingEnabled={snappingEnabled}
               altDown={altDown}
+              getAsset={(assetId) => assetsById.get(assetId) ?? null}
               offsets={offsets}
               selectedClipId={selectedClipId}
               playheadSeconds={playheadProjectTime}
@@ -1151,6 +1158,7 @@ function TimelineStrip({
   zoom,
   snappingEnabled,
   altDown,
+  getAsset,
   offsets,
   selectedClipId,
   playheadSeconds,
@@ -1171,6 +1179,7 @@ function TimelineStrip({
   zoom: number;
   snappingEnabled: boolean;
   altDown: boolean;
+  getAsset: (assetId: string) => Asset | null;
   offsets: Map<string, number>;
   selectedClipId: string | null;
   playheadSeconds: number;
@@ -1264,6 +1273,20 @@ function TimelineStrip({
     return snapped;
   }
 
+  function waveformStyle(asset: Asset | null, clip: ProjectClip) {
+    if (!asset?.hasAudio || !asset.waveformUrl || !asset.durationSeconds) return null;
+    const total = asset.durationSeconds;
+    const clipLen = Math.max(0.2, clip.sourceOut - clip.sourceIn);
+    const sizeX = (total / clipLen) * 100;
+    const posX = total > clipLen ? (clip.sourceIn / (total - clipLen)) * 100 : 0;
+    return {
+      backgroundImage: `url(${asset.waveformUrl})`,
+      backgroundRepeat: "no-repeat",
+      backgroundSize: `${sizeX.toFixed(3)}% 100%`,
+      backgroundPosition: `${clamp(posX, 0, 100).toFixed(3)}% 50%`
+    } as any;
+  }
+
   return (
     <div className="timelineStripWrap">
       <div
@@ -1332,65 +1355,86 @@ function TimelineStrip({
               Drop clips here
             </div>
           ) : null}
-          {timeline.clips.map((c) => {
-            const clipOffset = offsets.get(c.id) ?? 0;
-            const len = Math.max(0.001, c.sourceOut - c.sourceIn);
-            const left = clamp(clipOffset / duration, 0, 1);
-            const width = clamp(len / duration, 0.002, 1);
-            const isSelected = c.id === selectedClipId;
-            return (
-              <div
-                key={c.id}
-                className={`tlClip ${isSelected ? "isSelected" : ""} ${draggingId === c.id ? "isDragging" : ""}`}
-                style={{ left: pct(left), width: pct(width) } as any}
-                role="listitem"
-                title={`${c.label} (${fmt(len)})`}
-                draggable
-                onDragStart={(e) => {
-                  onAnyDragStart({ kind: "clip", clipId: c.id });
-                  setDraggingId(c.id);
-                  try {
-                    const raw = JSON.stringify({ kind: "clip", clipId: c.id });
-                    e.dataTransfer.setData(DRAG_MIME, raw);
-                    e.dataTransfer.setData("text/plain", raw);
-                    e.dataTransfer.effectAllowed = "move";
-                  } catch {}
-                }}
-                onDragEnd={() => {
-                  setDraggingId(null);
-                  onAnyDragEnd();
-                }}
-                onPointerDown={(e) => {
-                  e.stopPropagation();
-                  onSelect(c.id);
-                }}
-              >
+          <div className="lane laneVideo" aria-label="Video track" role="list">
+            {timeline.clips.map((c) => {
+              const clipOffset = offsets.get(c.id) ?? 0;
+              const len = Math.max(0.001, c.sourceOut - c.sourceIn);
+              const left = clamp(clipOffset / duration, 0, 1);
+              const width = clamp(len / duration, 0.002, 1);
+              const isSelected = c.id === selectedClipId;
+              return (
                 <div
-                  className="tlHandle left"
+                  key={c.id}
+                  className={`tlClip ${isSelected ? "isSelected" : ""} ${draggingId === c.id ? "isDragging" : ""}`}
+                  style={{ left: pct(left), width: pct(width) } as any}
+                  role="listitem"
+                  title={`${c.label} (${fmt(len)})`}
+                  draggable
+                  onDragStart={(e) => {
+                    onAnyDragStart({ kind: "clip", clipId: c.id });
+                    setDraggingId(c.id);
+                    try {
+                      const raw = JSON.stringify({ kind: "clip", clipId: c.id });
+                      e.dataTransfer.setData(DRAG_MIME, raw);
+                      e.dataTransfer.setData("text/plain", raw);
+                      e.dataTransfer.effectAllowed = "move";
+                    } catch {}
+                  }}
+                  onDragEnd={() => {
+                    setDraggingId(null);
+                    onAnyDragEnd();
+                  }}
                   onPointerDown={(e) => {
                     e.stopPropagation();
-                    e.preventDefault(); // prevent native drag start
                     onSelect(c.id);
-                    onBeginDrag(c.id, "in", e.clientX);
                   }}
-                  aria-label="Trim in"
-                  draggable={false}
-                />
-                <div className="tlLabel">{c.label}</div>
+                >
+                  <div
+                    className="tlHandle left"
+                    onPointerDown={(e) => {
+                      e.stopPropagation();
+                      e.preventDefault(); // prevent native drag start
+                      onSelect(c.id);
+                      onBeginDrag(c.id, "in", e.clientX);
+                    }}
+                    aria-label="Trim in"
+                    draggable={false}
+                  />
+                  <div className="tlLabel">{c.label}</div>
+                  <div
+                    className="tlHandle right"
+                    onPointerDown={(e) => {
+                      e.stopPropagation();
+                      e.preventDefault(); // prevent native drag start
+                      onSelect(c.id);
+                      onBeginDrag(c.id, "out", e.clientX);
+                    }}
+                    aria-label="Trim out"
+                    draggable={false}
+                  />
+                </div>
+              );
+            })}
+          </div>
+
+          <div className="lane laneAudio" aria-label="Audio track" aria-hidden="true">
+            {timeline.clips.map((c) => {
+              const clipOffset = offsets.get(c.id) ?? 0;
+              const len = Math.max(0.001, c.sourceOut - c.sourceIn);
+              const left = clamp(clipOffset / duration, 0, 1);
+              const width = clamp(len / duration, 0.002, 1);
+              const asset = getAsset(c.assetId);
+              const ws = waveformStyle(asset, c);
+              const has = Boolean(asset?.hasAudio);
+              return (
                 <div
-                  className="tlHandle right"
-                  onPointerDown={(e) => {
-                    e.stopPropagation();
-                    e.preventDefault(); // prevent native drag start
-                    onSelect(c.id);
-                    onBeginDrag(c.id, "out", e.clientX);
-                  }}
-                  aria-label="Trim out"
-                  draggable={false}
+                  key={`a-${c.id}`}
+                  className={`audioClip ${has ? "has" : "none"}`}
+                  style={{ left: pct(left), width: pct(width), ...(ws ?? {}) } as any}
                 />
-              </div>
-            );
-          })}
+              );
+            })}
+          </div>
 
           <div className="playhead" style={{ left: pct(playheadX) } as any} aria-hidden="true" />
           {dropAt != null ? (

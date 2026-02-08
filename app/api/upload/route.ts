@@ -30,8 +30,11 @@ export async function POST(req: Request) {
   // Browsers can render that inconsistently; we bake the rotation into frames.
   let normalizedPath: string | null = null;
   let normalizedUrl: string | null = null;
+  let hasAudio = false;
+  let waveformUrl: string | null = null;
   try {
     const info = await getVideoStreamInfo(dst);
+    hasAudio = info.hasAudio;
     if (info.rotationDegrees !== 0) {
       const normName = `${assetId}_norm.mp4`;
       normalizedPath = path.join(publicDir, normName);
@@ -60,9 +63,23 @@ export async function POST(req: Request) {
     const clips = buildClipsFromCuts(durationSeconds, sceneTimes, { minClipSeconds: 2, maxClips: 12 });
     const analysis: AnalysisTimeline = { assetId, durationSeconds, clips };
 
+    // Generate a waveform image for the audio lane (optional).
+    if (hasAudio) {
+      try {
+        const waveName = `${assetId}_wave.png`;
+        const wavePath = path.join(publicDir, waveName);
+        await generateWaveform(analyzePath, wavePath);
+        waveformUrl = `/uploads/${waveName}`;
+      } catch {
+        waveformUrl = null;
+      }
+    }
+
     return NextResponse.json({
       assetId,
       videoUrl,
+      hasAudio,
+      waveformUrl,
       analysis
     });
   } catch {
@@ -72,6 +89,8 @@ export async function POST(req: Request) {
   return NextResponse.json({
     assetId,
     videoUrl,
+    hasAudio,
+    waveformUrl,
     analysis: null
   });
 }
@@ -132,8 +151,6 @@ async function getVideoStreamInfo(filePath: string) {
     [
       "-v",
       "error",
-      "-select_streams",
-      "v:0",
       "-show_streams",
       "-of",
       "json",
@@ -143,7 +160,8 @@ async function getVideoStreamInfo(filePath: string) {
   );
 
   const json = JSON.parse(stdout || "{}") as any;
-  const stream = json?.streams?.[0] ?? null;
+  const streams = Array.isArray(json?.streams) ? json.streams : [];
+  const stream = streams.find((s: any) => s?.codec_type === "video") ?? null;
   const width = Number(stream?.width ?? 0);
   const height = Number(stream?.height ?? 0);
 
@@ -168,7 +186,10 @@ async function getVideoStreamInfo(filePath: string) {
   else if (rot >= 135 && rot < 225) rot = 180;
   else rot = 270;
 
-  return { width, height, rotationDegrees: rot };
+  // Detect if an audio stream exists.
+  const hasAudio = streams.some((s: any) => s?.codec_type === "audio");
+
+  return { width, height, rotationDegrees: rot, hasAudio };
 }
 
 async function normalizeRotation(src: string, dst: string, rotationDegrees: number) {
@@ -204,6 +225,27 @@ async function normalizeRotation(src: string, dst: string, rotationDegrees: numb
       dst
     ],
     { timeoutMs: 10 * 60_000 }
+  );
+}
+
+async function generateWaveform(src: string, dst: string) {
+  // A lightweight, editor-like waveform thumbnail for the whole asset audio track.
+  // We keep it intentionally small; the UI stretches it.
+  await run(
+    "ffmpeg",
+    [
+      "-hide_banner",
+      "-y",
+      "-i",
+      src,
+      "-filter_complex",
+      // mono waveform, bright line on transparent-ish background feel (we'll blend in CSS)
+      "aformat=channel_layouts=mono,showwavespic=s=1400x180:colors=#5dd6ff",
+      "-frames:v",
+      "1",
+      dst
+    ],
+    { timeoutMs: 5 * 60_000 }
   );
 }
 
