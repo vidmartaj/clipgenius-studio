@@ -914,21 +914,23 @@ function TimelineStrip({
       <div
         className="timelineStrip"
         ref={refEl}
-        onPointerDown={(e) => {
+        onPointerDownCapture={(e) => {
           if (e.button !== 0) return;
           const el = refEl.current;
           if (!el) return;
+          const target = e.target as HTMLElement | null;
+          if (target?.closest?.(".tlHandle")) return; // let trim handles handle the drag
           scrubRef.current = { startX: e.clientX, moved: false };
           el.setPointerCapture?.(e.pointerId);
           onScrub(clientXToProjectTime(e.clientX), false);
         }}
-        onPointerMove={(e) => {
+        onPointerMoveCapture={(e) => {
           const s = scrubRef.current;
           if (!s) return;
           if (Math.abs(e.clientX - s.startX) > 2) s.moved = true;
           onScrub(clientXToProjectTime(e.clientX), false);
         }}
-        onPointerUp={(e) => {
+        onPointerUpCapture={(e) => {
           const s = scrubRef.current;
           scrubRef.current = null;
           if (!s) return;
