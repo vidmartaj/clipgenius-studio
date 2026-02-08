@@ -380,6 +380,8 @@ export default function StudioPage() {
     setIsPreviewing(false);
     const v = videoRef.current;
     if (v) v.pause();
+    const bg = bgVideoRef.current;
+    if (bg) bg.pause();
   }
 
   useEffect(() => {
@@ -522,16 +524,29 @@ export default function StudioPage() {
         const asset = assetsById.get(c.assetId);
         if (!asset) return;
         setSelectedClipId(c.id);
+        if (!play) {
+          // Scrub/seek without playing — also cancel any active preview sequence.
+          previewRef.current = { enabled: false, mode: "sequence", idx: 0, clipId: null, clipOffset: 0, stopAtSourceOut: 0 };
+          setIsPreviewing(false);
+          const v = videoRef.current;
+          if (v) v.pause();
+          const bg = bgVideoRef.current;
+          if (bg) bg.pause();
+          await ensurePlayerOnAsset(asset, c.sourceIn + within, false);
+          return;
+        }
+
+        // Click-to-play: start from this point and continue through the rest of the timeline.
         previewRef.current = {
-          enabled: play,
-          mode: "single",
+          enabled: true,
+          mode: "sequence",
           idx: i,
           clipId: c.id,
           clipOffset: acc,
           stopAtSourceOut: c.sourceOut
         };
-        setIsPreviewing(play);
-        await ensurePlayerOnAsset(asset, c.sourceIn + within, play);
+        setIsPreviewing(true);
+        await ensurePlayerOnAsset(asset, c.sourceIn + within, true);
         return;
       }
       acc += len;
@@ -840,7 +855,7 @@ export default function StudioPage() {
                 if (!clip) return;
                 const asset = assetsById.get(clip.assetId);
                 if (!asset) return;
-                await startClipPlayback(clip, timeline.clips.findIndex((c) => c.id === id), "single");
+                await startClipPlayback(clip, timeline.clips.findIndex((c) => c.id === id), "sequence");
               }}
               onScrub={(t, play) => scrubToProjectTime(t, play)}
               onBeginDrag={(clipId, handle, startX) => beginTrimDrag(clipId, handle, startX)}
