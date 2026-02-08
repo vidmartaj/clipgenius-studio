@@ -37,6 +37,7 @@ export default function StudioPage() {
   const bgVideoRef = useRef<HTMLVideoElement | null>(null);
   const stripRef = useRef<HTMLDivElement | null>(null);
   const pendingSeekRef = useRef<PendingSeek | null>(null);
+  const switchingRef = useRef(false);
 
   const [assets, setAssets] = useState<Asset[]>([]);
   const assetsById = useMemo(() => new Map(assets.map((a) => [a.assetId, a])), [assets]);
@@ -181,6 +182,7 @@ export default function StudioPage() {
 
     // If src already matches, onLoadedMetadata may not fire; seek immediately.
     if (v.currentSrc && v.currentSrc.endsWith(nextSrc)) {
+      switchingRef.current = false;
       v.currentTime = clamp(seekTo, 0, Number.isFinite(v.duration) ? v.duration : seekTo);
       if (play) v.play().catch(() => {});
       if (bg) {
@@ -189,7 +191,11 @@ export default function StudioPage() {
         else bg.pause();
       }
       pendingSeekRef.current = null;
+      return;
     }
+
+    // Source swap in progress: some browsers briefly fire pause during swaps.
+    switchingRef.current = true;
   }
 
   function onLoadedMetadata() {
@@ -209,6 +215,7 @@ export default function StudioPage() {
       else bg.pause();
     }
     pendingSeekRef.current = null;
+    switchingRef.current = false;
   }
 
   // ---- Upload / import ----
@@ -406,6 +413,7 @@ export default function StudioPage() {
     if (v) v.pause();
     const bg = bgVideoRef.current;
     if (bg) bg.pause();
+    switchingRef.current = false;
   }
 
   useEffect(() => {
@@ -413,6 +421,19 @@ export default function StudioPage() {
     if (!v) return;
 
     const epsilon = 0.05;
+    const advanceToNext = async () => {
+      const state = previewRef.current;
+      if (!state.enabled || state.mode !== "sequence") return;
+      if (switchingRef.current) return;
+      const nextIdx = state.idx + 1;
+      const next = timeline.clips[nextIdx];
+      if (!next) {
+        stopPreview();
+        return;
+      }
+      switchingRef.current = true;
+      await startClipPlayback(next, nextIdx, "sequence");
+    };
 
     const onTimeUpdateAsync = async () => {
       const state = previewRef.current;
@@ -447,21 +468,16 @@ export default function StudioPage() {
           stopPreview();
           return;
         }
-        const nextIdx = state.idx + 1;
-        const next = timeline.clips[nextIdx];
-        if (!next) {
-          stopPreview();
-          return;
-        }
-        await startClipPlayback(next, nextIdx, "sequence");
+        await advanceToNext();
       }
     };
 
     const onTimeUpdate = () => void onTimeUpdateAsync();
+    const onEnded = () => void advanceToNext();
     v.addEventListener("timeupdate", onTimeUpdate);
-    v.addEventListener("ended", stopPreview);
+    v.addEventListener("ended", onEnded);
     return () => {
-      v.removeEventListener("ended", stopPreview);
+      v.removeEventListener("ended", onEnded);
       v.removeEventListener("timeupdate", onTimeUpdate);
     };
   }, [timeline, duration, offsets, assetsById]);
@@ -726,6 +742,7 @@ export default function StudioPage() {
                       className="fgVideo"
                       src={playerSrc}
                       controls
+                      autoPlay
                       playsInline
                       preload="metadata"
                       onLoadedMetadata={onLoadedMetadata}
@@ -758,6 +775,8 @@ export default function StudioPage() {
                       }}
                       onPause={() => {
                         // Pause should pause timeline playback as well (without resetting state).
+                        // During source swaps some browsers briefly pause; don't treat that as a user pause.
+                        if (switchingRef.current) return;
                         previewRef.current.enabled = false;
                         setIsPreviewing(false);
                         bgVideoRef.current?.pause();
