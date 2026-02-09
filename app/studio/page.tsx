@@ -2,7 +2,7 @@
 
 import { useEffect, useMemo, useRef, useState } from "react";
 import type { MutableRefObject } from "react";
-import type { AssistantReply, AnalysisTimeline, ProjectClip, ProjectTimeline } from "../../lib/types";
+import type { AssistantReply, AnalysisTimeline, AudioClip, ProjectClip, ProjectTimeline } from "../../lib/types";
 import { projectClipOffsets, projectDurationSeconds, splitProjectClipAt, trimProjectTimelineToTargetSeconds } from "../../lib/timeline";
 
 type ExportSettings = {
@@ -25,6 +25,7 @@ type Asset = {
 type HistoryState = {
   timeline: ProjectTimeline;
   selectedClipId: string | null;
+  selectedAudioClipId: string | null;
 };
 
 type PendingSeek = {
@@ -35,7 +36,8 @@ type PendingSeek = {
 
 type DragPayload =
   | { kind: "asset"; assetId: string }
-  | { kind: "clip"; clipId: string };
+  | { kind: "clip"; clipId: string }
+  | { kind: "audio_clip"; clipId: string };
 
 const DRAG_MIME = "application/x-clipgenius-studio";
 
@@ -76,12 +78,20 @@ export default function StudioPage() {
     return map;
   }, [assets]);
 
-  const [timeline, setTimeline] = useState<ProjectTimeline>({ projectId: "local", clips: [] });
+  const [timeline, setTimeline] = useState<ProjectTimeline>({
+    projectId: "local",
+    clips: [],
+    audioLinked: true,
+    trackAudioMuted: false,
+    trackVideoHidden: false
+  });
   const [selectedClipId, setSelectedClipId] = useState<string | null>(null);
+  const [selectedAudioClipId, setSelectedAudioClipId] = useState<string | null>(null);
 
   const [playerSrc, setPlayerSrc] = useState<string | null>(null);
   const [timelineZoom, setTimelineZoom] = useState(1.6);
-  const [snappingEnabled, setSnappingEnabled] = useState(true);
+  // Snapping exists in code, but we keep it off by default for now (we'll revisit later).
+  const [snappingEnabled] = useState(false);
   const [altDown, setAltDown] = useState(false);
   const [isUploading, setIsUploading] = useState(false);
   const [uploadError, setUploadError] = useState<string | null>(null);
@@ -115,10 +125,28 @@ export default function StudioPage() {
   const duration = useMemo(() => projectDurationSeconds(timeline), [timeline]);
   const offsets = useMemo(() => projectClipOffsets(timeline), [timeline]);
 
+  const audioClips = useMemo<AudioClip[]>(() => {
+    if (timeline.audioLinked === false && Array.isArray(timeline.audioClips)) return timeline.audioClips;
+    // Linked mode: derive audio clips from video clips for display. These are not editable.
+    return timeline.clips.map((c) => ({
+      id: `linked-${c.id}`,
+      assetId: c.assetId,
+      label: c.label,
+      sourceIn: c.sourceIn,
+      sourceOut: c.sourceOut,
+      start: offsets.get(c.id) ?? 0
+    }));
+  }, [timeline, offsets]);
+
   const selectedClip = useMemo(() => {
     if (!selectedClipId) return null;
     return timeline.clips.find((c) => c.id === selectedClipId) ?? null;
   }, [timeline, selectedClipId]);
+
+  const selectedAudioClip = useMemo(() => {
+    if (!selectedAudioClipId) return null;
+    return audioClips.find((c) => c.id === selectedAudioClipId) ?? null;
+  }, [audioClips, selectedAudioClipId]);
 
   const selectedAsset = useMemo(() => {
     if (!selectedClip) return null;
@@ -140,7 +168,26 @@ export default function StudioPage() {
       changed = true;
       return { ...c, sourceIn, sourceOut };
     });
-    return changed ? { ...t, clips } : t;
+
+    const projectDuration = Math.max(0.001, projectDurationSeconds({ ...t, clips }));
+    let audioClips: AudioClip[] | undefined = t.audioClips;
+    if (t.audioLinked === false && Array.isArray(t.audioClips)) {
+      audioClips = t.audioClips.map((c) => {
+        const asset = assetsById.get(c.assetId);
+        const maxOut = asset?.durationSeconds || 0;
+        if (!maxOut || !Number.isFinite(maxOut) || maxOut <= 0) return c;
+        const sourceIn = clamp(c.sourceIn, 0, Math.max(0, maxOut - minLen));
+        const sourceOut = clamp(c.sourceOut, sourceIn + minLen, maxOut);
+        const len = Math.max(minLen, sourceOut - sourceIn);
+        const startRaw = Number.isFinite(c.start) ? c.start : 0;
+        const start = clamp(startRaw, 0, Math.max(0, projectDuration - len));
+        if (sourceIn === c.sourceIn && sourceOut === c.sourceOut && start === c.start) return c;
+        changed = true;
+        return { ...c, sourceIn, sourceOut, start };
+      });
+    }
+
+    return changed ? { ...t, clips, audioClips } : t;
   }
 
   function makeClipFromAsset(a: Asset): ProjectClip | null {
@@ -151,6 +198,19 @@ export default function StudioPage() {
       label: cleanName(a.name),
       sourceIn: 0,
       sourceOut: a.durationSeconds
+    };
+  }
+
+  function makeAudioClipFromAsset(a: Asset): AudioClip | null {
+    if (!a.hasAudio) return null;
+    if (!a.durationSeconds || !Number.isFinite(a.durationSeconds) || a.durationSeconds <= 0) return null;
+    return {
+      id: crypto.randomUUID(),
+      assetId: a.assetId,
+      label: cleanName(a.name),
+      sourceIn: 0,
+      sourceOut: a.durationSeconds,
+      start: 0
     };
   }
 
@@ -173,6 +233,17 @@ export default function StudioPage() {
     return timeline.clips.length;
   }
 
+  function computeAudioInsertIndex(projectTime: number, clips: AudioClip[]) {
+    const t = clamp(projectTime, 0, duration);
+    for (let i = 0; i < clips.length; i++) {
+      const c = clips[i];
+      const len = Math.max(0.2, c.sourceOut - c.sourceIn);
+      const mid = c.start + len / 2;
+      if (t < mid) return i;
+    }
+    return clips.length;
+  }
+
   async function insertAssetAtTime(assetId: string, projectTime: number) {
     const a = assetsById.get(assetId);
     if (!a) return;
@@ -180,8 +251,39 @@ export default function StudioPage() {
     if (!clip) return;
     const idx = computeInsertIndex(projectTime);
     const nextClips = [...timeline.clips.slice(0, idx), clip, ...timeline.clips.slice(idx)];
-    applyWithHistory({ timeline: { ...timeline, clips: nextClips }, selectedClipId: clip.id });
+    let nextTimeline: ProjectTimeline = { ...timeline, clips: nextClips };
+    if (timeline.audioLinked === false && a.hasAudio) {
+      const offsetsNext = projectClipOffsets(nextTimeline);
+      const start = offsetsNext.get(clip.id) ?? 0;
+      const audioClip = makeAudioClipFromAsset(a);
+      if (audioClip) {
+        audioClip.start = start;
+        const existing = Array.isArray(timeline.audioClips) ? timeline.audioClips : [];
+        const sorted = [...existing].sort((x, y) => x.start - y.start);
+        const insertIdx = computeAudioInsertIndex(start, sorted);
+        nextTimeline = { ...nextTimeline, audioClips: [...sorted.slice(0, insertIdx), audioClip, ...sorted.slice(insertIdx)] };
+      }
+    }
+    applyWithHistory({ timeline: nextTimeline, selectedClipId: clip.id });
     await ensurePlayerOnAsset(a, clip.sourceIn, false);
+  }
+
+  async function insertAssetAudioAtTime(assetId: string, projectTime: number) {
+    const a = assetsById.get(assetId);
+    if (!a) return;
+    const clip = makeAudioClipFromAsset(a);
+    if (!clip) return;
+    const len = Math.max(0.2, clip.sourceOut - clip.sourceIn);
+    clip.start = clamp(projectTime, 0, Math.max(0, duration - len));
+    const existing = timeline.audioLinked === false && Array.isArray(timeline.audioClips) ? timeline.audioClips : [];
+    const sorted = [...existing].sort((x, y) => x.start - y.start);
+    const idx = computeAudioInsertIndex(clip.start, sorted);
+    const nextAudio = [...sorted.slice(0, idx), clip, ...sorted.slice(idx)];
+    applyWithHistory({
+      timeline: { ...timeline, audioLinked: false, audioClips: nextAudio },
+      selectedClipId,
+      selectedAudioClipId: clip.id
+    });
   }
 
   async function reorderClipToTime(clipId: string, projectTime: number) {
@@ -195,6 +297,24 @@ export default function StudioPage() {
     const remaining = timeline.clips.filter((c) => c.id !== clipId);
     const nextClips = [...remaining.slice(0, toIdx), clip, ...remaining.slice(toIdx)];
     applyWithHistory({ timeline: { ...timeline, clips: nextClips }, selectedClipId: clipId });
+  }
+
+  async function reorderAudioClipToTime(clipId: string, projectTime: number) {
+    if (timeline.audioLinked !== false || !Array.isArray(timeline.audioClips)) return;
+    const fromIdx = timeline.audioClips.findIndex((c) => c.id === clipId);
+    if (fromIdx === -1) return;
+    const clip = timeline.audioClips[fromIdx];
+    const len = Math.max(0.2, clip.sourceOut - clip.sourceIn);
+    const nextStart = clamp(projectTime, 0, Math.max(0, duration - len));
+    const remaining = timeline.audioClips.filter((c) => c.id !== clipId);
+    const sorted = [...remaining].sort((x, y) => x.start - y.start);
+    const toIdx = computeAudioInsertIndex(nextStart, sorted);
+    const nextAudio = [...sorted.slice(0, toIdx), { ...clip, start: nextStart }, ...sorted.slice(toIdx)];
+    applyWithHistory({
+      timeline: { ...timeline, audioLinked: false, audioClips: nextAudio },
+      selectedClipId,
+      selectedAudioClipId: clipId
+    });
   }
 
   function setDragData(e: React.DragEvent, payload: DragPayload) {
@@ -214,6 +334,7 @@ export default function StudioPage() {
       const parsed = JSON.parse(raw) as DragPayload;
       if (parsed?.kind === "asset" && typeof parsed.assetId === "string") return parsed;
       if (parsed?.kind === "clip" && typeof parsed.clipId === "string") return parsed;
+      if (parsed?.kind === "audio_clip" && typeof parsed.clipId === "string") return parsed;
       return null;
     } catch {
       return null;
@@ -239,13 +360,23 @@ export default function StudioPage() {
     void ensurePlayerOnAsset(selectedAsset, selectedClip.sourceIn, false);
   }, [selectedClipId, selectedAsset?.assetId]);
 
+  // Track mute: controls preview audio immediately.
+  useEffect(() => {
+    const muted = Boolean(timeline.trackAudioMuted);
+    const fg = videoRef.current;
+    const bg = bgVideoRef.current;
+    if (fg) fg.muted = muted;
+    if (bg) bg.muted = true; // background layer is always muted
+  }, [timeline.trackAudioMuted]);
+
   // ---- Undo / redo ----
-  function applyWithHistory(next: { timeline: ProjectTimeline; selectedClipId: string | null }) {
+  function applyWithHistory(next: { timeline: ProjectTimeline; selectedClipId: string | null; selectedAudioClipId?: string | null }) {
     const sanitized = sanitizeTimelineIfNeeded(next.timeline);
-    setPast((p) => [...p, { timeline, selectedClipId }].slice(-80));
+    setPast((p) => [...p, { timeline, selectedClipId, selectedAudioClipId }].slice(-80));
     setFuture([]);
     setTimeline(sanitized);
     setSelectedClipId(next.selectedClipId);
+    setSelectedAudioClipId(next.selectedAudioClipId ?? null);
     setExportUrl(null);
     setExportError(null);
   }
@@ -254,9 +385,10 @@ export default function StudioPage() {
     setPast((p) => {
       if (p.length === 0) return p;
       const prev = p[p.length - 1];
-      setFuture((f) => [{ timeline, selectedClipId }, ...f].slice(0, 80));
+      setFuture((f) => [{ timeline, selectedClipId, selectedAudioClipId }, ...f].slice(0, 80));
       setTimeline(prev.timeline);
       setSelectedClipId(prev.selectedClipId);
+      setSelectedAudioClipId(prev.selectedAudioClipId);
       setExportUrl(null);
       setExportError(null);
       return p.slice(0, -1);
@@ -267,9 +399,10 @@ export default function StudioPage() {
     setFuture((f) => {
       if (f.length === 0) return f;
       const next = f[0];
-      setPast((p) => [...p, { timeline, selectedClipId }].slice(-80));
+      setPast((p) => [...p, { timeline, selectedClipId, selectedAudioClipId }].slice(-80));
       setTimeline(next.timeline);
       setSelectedClipId(next.selectedClipId);
+      setSelectedAudioClipId(next.selectedAudioClipId);
       setExportUrl(null);
       setExportError(null);
       return f.slice(1);
@@ -492,6 +625,40 @@ export default function StudioPage() {
     }
   }
 
+  function toggleAudioLink() {
+    if (timeline.audioLinked === false) {
+      // Relink: derive audio from video clips.
+      applyWithHistory({
+        timeline: { ...timeline, audioLinked: true, audioClips: undefined },
+        selectedClipId,
+        selectedAudioClipId: null
+      });
+      return;
+    }
+
+    // Unlink: materialize audio clips from current video clips that actually have audio.
+    const nextAudio: AudioClip[] = [];
+    for (const c of timeline.clips) {
+      const a = assetsById.get(c.assetId);
+      if (!a?.hasAudio) continue;
+      const start = offsets.get(c.id) ?? 0;
+      nextAudio.push({
+        id: crypto.randomUUID(),
+        assetId: c.assetId,
+        label: c.label,
+        sourceIn: c.sourceIn,
+        sourceOut: c.sourceOut,
+        start
+      });
+    }
+
+    applyWithHistory({
+      timeline: { ...timeline, audioLinked: false, audioClips: nextAudio.sort((x, y) => x.start - y.start) },
+      selectedClipId,
+      selectedAudioClipId: nextAudio[0]?.id ?? null
+    });
+  }
+
   // ---- Export ----
   async function onExport() {
     if (timeline.clips.length === 0) return;
@@ -654,7 +821,7 @@ export default function StudioPage() {
       startIn: clip.sourceIn,
       startOut: clip.sourceOut,
       secondsPerPx,
-      prevState: { timeline, selectedClipId },
+      prevState: { timeline, selectedClipId, selectedAudioClipId },
       didMove: false
     };
   }
@@ -1076,15 +1243,6 @@ export default function StudioPage() {
                 <span>Timeline</span>
               </div>
               <div className="timelineRight">
-                <button
-                  type="button"
-                  className={`snapBtn ${snappingEnabled ? "on" : "off"}`}
-                  onClick={() => setSnappingEnabled((s) => !s)}
-                  title={snappingEnabled ? "Snapping ON (hold Alt to disable)" : "Snapping OFF"}
-                  aria-pressed={snappingEnabled}
-                >
-                  Snap {snappingEnabled ? "On" : "Off"}
-                </button>
                 <label className="zoomCtl">
                   <span>Zoom</span>
                   <input
@@ -1105,6 +1263,7 @@ export default function StudioPage() {
             <TimelineStrip
               refEl={stripRef}
               timeline={timeline}
+              audioClips={audioClips}
               durationSeconds={duration}
               zoom={timelineZoom}
               snappingEnabled={snappingEnabled}
@@ -1112,24 +1271,47 @@ export default function StudioPage() {
               getAsset={(assetId) => assetsById.get(assetId) ?? null}
               offsets={offsets}
               selectedClipId={selectedClipId}
+              selectedAudioClipId={selectedAudioClipId}
               playheadSeconds={playheadProjectTime}
               onSelect={async (id) => {
                 setSelectedClipId(id);
+                setSelectedAudioClipId(null);
                 const clip = timeline.clips.find((c) => c.id === id);
                 if (!clip) return;
                 const asset = assetsById.get(clip.assetId);
                 if (!asset) return;
                 await startClipPlayback(clip, timeline.clips.findIndex((c) => c.id === id), "sequence");
               }}
+              onSelectAudio={(id) => {
+                setSelectedAudioClipId(id);
+                setSelectedClipId(null);
+              }}
+              onToggleAudioLink={toggleAudioLink}
+              onToggleTrackMute={() => {
+                applyWithHistory({
+                  timeline: { ...timeline, trackAudioMuted: !timeline.trackAudioMuted },
+                  selectedClipId,
+                  selectedAudioClipId
+                });
+              }}
               onScrub={(t, play) => scrubToProjectTime(t, play)}
               onBeginDrag={(clipId, handle, startX) => beginTrimDrag(clipId, handle, startX)}
-              onDropPayload={async (payload, t) => {
+              onDropVideoPayload={async (payload, t) => {
                 if (payload.kind === "asset") await insertAssetAtTime(payload.assetId, t);
                 if (payload.kind === "clip") await reorderClipToTime(payload.clipId, t);
               }}
+              onDropAudioPayload={async (payload, t) => {
+                if (payload.kind === "asset") await insertAssetAudioAtTime(payload.assetId, t);
+                if (payload.kind === "audio_clip") await reorderAudioClipToTime(payload.clipId, t);
+              }}
               getGhostLenSeconds={(payload) => {
                 if (payload.kind === "asset") return assetsById.get(payload.assetId)?.durationSeconds ?? null;
-                const c = timeline.clips.find((x) => x.id === payload.clipId);
+                if (payload.kind === "clip") {
+                  const c = timeline.clips.find((x) => x.id === payload.clipId);
+                  if (!c) return null;
+                  return Math.max(0.2, c.sourceOut - c.sourceIn);
+                }
+                const c = (timeline.audioClips || []).find((x) => x.id === payload.clipId);
                 if (!c) return null;
                 return Math.max(0.2, c.sourceOut - c.sourceIn);
               }}
@@ -1154,6 +1336,7 @@ export default function StudioPage() {
 function TimelineStrip({
   refEl,
   timeline,
+  audioClips,
   durationSeconds,
   zoom,
   snappingEnabled,
@@ -1161,12 +1344,16 @@ function TimelineStrip({
   getAsset,
   offsets,
   selectedClipId,
+  selectedAudioClipId,
   playheadSeconds,
   onSelect,
+  onSelectAudio,
+  onToggleAudioLink,
+  onToggleTrackMute,
   onScrub,
-  onBeginDrag
-  ,
-  onDropPayload,
+  onBeginDrag,
+  onDropVideoPayload,
+  onDropAudioPayload,
   getGhostLenSeconds,
   getDragData,
   getCurrentDrag,
@@ -1175,6 +1362,7 @@ function TimelineStrip({
 }: {
   refEl: MutableRefObject<HTMLDivElement | null>;
   timeline: ProjectTimeline;
+  audioClips: AudioClip[];
   durationSeconds: number;
   zoom: number;
   snappingEnabled: boolean;
@@ -1182,11 +1370,16 @@ function TimelineStrip({
   getAsset: (assetId: string) => Asset | null;
   offsets: Map<string, number>;
   selectedClipId: string | null;
+  selectedAudioClipId: string | null;
   playheadSeconds: number;
   onSelect: (id: string) => void;
+  onSelectAudio: (id: string) => void;
+  onToggleAudioLink: () => void;
+  onToggleTrackMute: () => void;
   onScrub: (t: number, play: boolean) => void;
   onBeginDrag: (clipId: string, handle: "in" | "out", startX: number) => void;
-  onDropPayload: (payload: DragPayload, projectTime: number) => void;
+  onDropVideoPayload: (payload: DragPayload, projectTime: number) => void;
+  onDropAudioPayload: (payload: DragPayload, projectTime: number) => void;
   getGhostLenSeconds: (payload: DragPayload) => number | null;
   getDragData: (e: React.DragEvent) => DragPayload | null;
   getCurrentDrag: () => DragPayload | null;
@@ -1198,9 +1391,12 @@ function TimelineStrip({
   const scrubRef = useRef<null | { startX: number; moved: boolean }>(null);
   const [dropAt, setDropAt] = useState<number | null>(null);
   const [dropPayload, setDropPayload] = useState<DragPayload | null>(null);
+  const [dropLane, setDropLane] = useState<"video" | "audio">("video");
   const [draggingId, setDraggingId] = useState<string | null>(null);
   const dragDepthRef = useRef(0);
   const [snapFlashAt, setSnapFlashAt] = useState<number | null>(null);
+  const laneVideoRef = useRef<HTMLDivElement | null>(null);
+  const laneAudioRef = useRef<HTMLDivElement | null>(null);
 
   function clientXToProjectTime(clientX: number) {
     const el = refEl.current;
@@ -1273,7 +1469,7 @@ function TimelineStrip({
     return snapped;
   }
 
-  function waveformStyle(asset: Asset | null, clip: ProjectClip) {
+  function waveformStyle(asset: Asset | null, clip: { sourceIn: number; sourceOut: number }) {
     if (!asset?.hasAudio || !asset.waveformUrl || !asset.durationSeconds) return null;
     const total = asset.durationSeconds;
     const clipLen = Math.max(0.2, clip.sourceOut - clip.sourceIn);
@@ -1287,182 +1483,262 @@ function TimelineStrip({
     } as any;
   }
 
+  function isOverLane(ref: MutableRefObject<HTMLDivElement | null>, clientY: number) {
+    const el = ref.current;
+    if (!el) return false;
+    const r = el.getBoundingClientRect();
+    return clientY >= r.top && clientY <= r.bottom;
+  }
+
+  function resolveDropLane(payload: DragPayload, clientY: number): "video" | "audio" {
+    if (payload.kind === "clip") return "video";
+    if (payload.kind === "audio_clip") return "audio";
+    const overAudio = isOverLane(laneAudioRef, clientY);
+    if (!overAudio) return "video";
+    if (timeline.audioLinked !== false) return "video";
+    const a = getAsset(payload.assetId);
+    if (!a?.hasAudio) return "video";
+    return "audio";
+  }
+
   return (
     <div className="timelineStripWrap">
-      <div
-        className="timelineStrip"
-        ref={refEl}
-        onPointerDownCapture={(e) => {
-          if (e.button !== 0) return;
-          const el = refEl.current;
-          if (!el) return;
-          const target = e.target as HTMLElement | null;
-          if (target?.closest?.(".tlHandle")) return; // let trim handles handle the drag
-          scrubRef.current = { startX: e.clientX, moved: false };
-          el.setPointerCapture?.(e.pointerId);
-          onScrub(clientXToProjectTime(e.clientX), false);
-        }}
-        onPointerMoveCapture={(e) => {
-          const s = scrubRef.current;
-          if (!s) return;
-          if (Math.abs(e.clientX - s.startX) > 2) s.moved = true;
-          onScrub(clientXToProjectTime(e.clientX), false);
-        }}
-        onPointerUpCapture={(e) => {
-          const s = scrubRef.current;
-          scrubRef.current = null;
-          if (!s) return;
-          if (!s.moved) onScrub(clientXToProjectTime(e.clientX), true);
-        }}
-        role="list"
-        aria-label="Timeline strip"
-        onDragEnter={(e) => {
-          const payload = getCurrentDrag() || getDragData(e);
-          if (!payload) return;
-          dragDepthRef.current += 1;
-        }}
-        onDragOver={(e) => {
-          const payload = getCurrentDrag() || getDragData(e);
-          if (!payload) return;
-          e.preventDefault();
-          e.dataTransfer.dropEffect = payload.kind === "asset" ? "copy" : "move";
-          setDropAt(snapProjectTime(clientXToProjectTime(e.clientX)));
-          setDropPayload(payload);
-        }}
-        onDragLeave={() => {
-          dragDepthRef.current = Math.max(0, dragDepthRef.current - 1);
-          if (dragDepthRef.current === 0) {
+      <div className="timelineStripGrid">
+        <div className="trackRail" aria-label="Tracks">
+          <div className="trackRailRow">
+            <div className="trackLabel" aria-hidden="true">V1</div>
+          </div>
+          <div className="trackRailRow">
+            <div className="trackLabel" aria-hidden="true">A1</div>
+            <button
+              type="button"
+              className={`trackBtn ${timeline.trackAudioMuted ? "on" : ""}`}
+              onClick={onToggleTrackMute}
+              aria-pressed={Boolean(timeline.trackAudioMuted)}
+              title={timeline.trackAudioMuted ? "Unmute track" : "Mute track"}
+            >
+              {timeline.trackAudioMuted ? "Muted" : "Audio"}
+            </button>
+            <button
+              type="button"
+              className={`trackBtn ${timeline.audioLinked === false ? "on" : ""}`}
+              onClick={onToggleAudioLink}
+              aria-pressed={timeline.audioLinked === false}
+              title={timeline.audioLinked === false ? "Relink audio to video" : "Unlink audio to edit separately"}
+            >
+              {timeline.audioLinked === false ? "Unlinked" : "Linked"}
+            </button>
+          </div>
+        </div>
+
+        <div
+          className="timelineStrip"
+          ref={refEl}
+          onPointerDownCapture={(e) => {
+            if (e.button !== 0) return;
+            const el = refEl.current;
+            if (!el) return;
+            const target = e.target as HTMLElement | null;
+            if (target?.closest?.(".tlHandle")) return; // let trim handles handle the drag
+            scrubRef.current = { startX: e.clientX, moved: false };
+            el.setPointerCapture?.(e.pointerId);
+            onScrub(clientXToProjectTime(e.clientX), false);
+          }}
+          onPointerMoveCapture={(e) => {
+            const s = scrubRef.current;
+            if (!s) return;
+            if (Math.abs(e.clientX - s.startX) > 2) s.moved = true;
+            onScrub(clientXToProjectTime(e.clientX), false);
+          }}
+          onPointerUpCapture={(e) => {
+            const s = scrubRef.current;
+            scrubRef.current = null;
+            if (!s) return;
+            if (!s.moved) onScrub(clientXToProjectTime(e.clientX), true);
+          }}
+          role="list"
+          aria-label="Timeline strip"
+          onDragEnter={(e) => {
+            const payload = getCurrentDrag() || getDragData(e);
+            if (!payload) return;
+            dragDepthRef.current += 1;
+          }}
+          onDragOver={(e) => {
+            const payload = getCurrentDrag() || getDragData(e);
+            if (!payload) return;
+            e.preventDefault();
+            e.dataTransfer.dropEffect = payload.kind === "asset" ? "copy" : "move";
+            setDropLane(resolveDropLane(payload, e.clientY));
+            setDropAt(snapProjectTime(clientXToProjectTime(e.clientX)));
+            setDropPayload(payload);
+          }}
+          onDragLeave={() => {
+            dragDepthRef.current = Math.max(0, dragDepthRef.current - 1);
+            if (dragDepthRef.current === 0) {
+              setDropAt(null);
+              setDropPayload(null);
+              setDropLane("video");
+            }
+          }}
+          onDrop={(e) => {
+            const payload = getCurrentDrag() || getDragData(e);
+            if (!payload) return;
+            e.preventDefault();
+            const t = snapProjectTime(clientXToProjectTime(e.clientX));
+            const lane = resolveDropLane(payload, e.clientY);
             setDropAt(null);
             setDropPayload(null);
-          }
-        }}
-        onDrop={(e) => {
-          const payload = getCurrentDrag() || getDragData(e);
-          if (!payload) return;
-          e.preventDefault();
-          const t = snapProjectTime(clientXToProjectTime(e.clientX));
-          setDropAt(null);
-          setDropPayload(null);
-          setDraggingId(null);
-          dragDepthRef.current = 0;
-          onDropPayload(payload, t);
-          onAnyDragEnd();
-        }}
-      >
-        <div className="timelineStripInner" style={{ width: pct(zoom) } as any}>
-          {timeline.clips.length === 0 ? (
-            <div className="timelineEmptyDrop" aria-hidden="true">
-              Drop clips here
+            setDropLane("video");
+            setDraggingId(null);
+            dragDepthRef.current = 0;
+            if (lane === "audio") onDropAudioPayload(payload, t);
+            else onDropVideoPayload(payload, t);
+            onAnyDragEnd();
+          }}
+        >
+          <div className="timelineStripInner" style={{ width: pct(zoom) } as any}>
+            {timeline.clips.length === 0 ? (
+              <div className="timelineEmptyDrop" aria-hidden="true">
+                Drop clips here
+              </div>
+            ) : null}
+
+            <div className="lane laneVideo" aria-label="Video track" role="list" ref={laneVideoRef}>
+              {timeline.clips.map((c) => {
+                const clipOffset = offsets.get(c.id) ?? 0;
+                const len = Math.max(0.001, c.sourceOut - c.sourceIn);
+                const left = clamp(clipOffset / duration, 0, 1);
+                const width = clamp(len / duration, 0.002, 1);
+                const isSelected = c.id === selectedClipId;
+                return (
+                  <div
+                    key={c.id}
+                    className={`tlClip ${isSelected ? "isSelected" : ""} ${draggingId === c.id ? "isDragging" : ""}`}
+                    style={{ left: pct(left), width: pct(width) } as any}
+                    role="listitem"
+                    title={`${c.label} (${fmt(len)})`}
+                    draggable
+                    onDragStart={(e) => {
+                      onAnyDragStart({ kind: "clip", clipId: c.id });
+                      setDraggingId(c.id);
+                      try {
+                        const raw = JSON.stringify({ kind: "clip", clipId: c.id });
+                        e.dataTransfer.setData(DRAG_MIME, raw);
+                        e.dataTransfer.setData("text/plain", raw);
+                        e.dataTransfer.effectAllowed = "move";
+                      } catch {}
+                    }}
+                    onDragEnd={() => {
+                      setDraggingId(null);
+                      onAnyDragEnd();
+                    }}
+                    onPointerDown={(e) => {
+                      e.stopPropagation();
+                      onSelect(c.id);
+                    }}
+                  >
+                    <div
+                      className="tlHandle left"
+                      onPointerDown={(e) => {
+                        e.stopPropagation();
+                        e.preventDefault(); // prevent native drag start
+                        onSelect(c.id);
+                        onBeginDrag(c.id, "in", e.clientX);
+                      }}
+                      aria-label="Trim in"
+                      draggable={false}
+                    />
+                    <div className="tlLabel">{c.label}</div>
+                    <div
+                      className="tlHandle right"
+                      onPointerDown={(e) => {
+                        e.stopPropagation();
+                        e.preventDefault(); // prevent native drag start
+                        onSelect(c.id);
+                        onBeginDrag(c.id, "out", e.clientX);
+                      }}
+                      aria-label="Trim out"
+                      draggable={false}
+                    />
+                  </div>
+                );
+              })}
+
+              {dropAt != null && dropPayload && dropLane === "video"
+                ? (() => {
+                    const len = getGhostLenSeconds(dropPayload);
+                    if (!len || !Number.isFinite(len) || len <= 0) return null;
+                    const idx = computeDropIndex(dropAt);
+                    const leftSeconds = indexToLeftSeconds(idx);
+                    const left = clamp(leftSeconds / duration, 0, 1);
+                    // When the timeline is empty, treat the ghost as a medium-size block.
+                    const width = timeline.clips.length === 0 ? 0.35 : clamp(len / duration, 0.01, 0.9);
+                    return <div className="ghostClip" style={{ left: pct(left), width: pct(width) } as any} aria-hidden="true" />;
+                  })()
+                : null}
             </div>
-          ) : null}
-          <div className="lane laneVideo" aria-label="Video track" role="list">
-            {timeline.clips.map((c) => {
-              const clipOffset = offsets.get(c.id) ?? 0;
-              const len = Math.max(0.001, c.sourceOut - c.sourceIn);
-              const left = clamp(clipOffset / duration, 0, 1);
-              const width = clamp(len / duration, 0.002, 1);
-              const isSelected = c.id === selectedClipId;
-              return (
-                <div
-                  key={c.id}
-                  className={`tlClip ${isSelected ? "isSelected" : ""} ${draggingId === c.id ? "isDragging" : ""}`}
-                  style={{ left: pct(left), width: pct(width) } as any}
-                  role="listitem"
-                  title={`${c.label} (${fmt(len)})`}
-                  draggable
-                  onDragStart={(e) => {
-                    onAnyDragStart({ kind: "clip", clipId: c.id });
-                    setDraggingId(c.id);
-                    try {
-                      const raw = JSON.stringify({ kind: "clip", clipId: c.id });
-                      e.dataTransfer.setData(DRAG_MIME, raw);
-                      e.dataTransfer.setData("text/plain", raw);
-                      e.dataTransfer.effectAllowed = "move";
-                    } catch {}
-                  }}
-                  onDragEnd={() => {
-                    setDraggingId(null);
-                    onAnyDragEnd();
-                  }}
-                  onPointerDown={(e) => {
-                    e.stopPropagation();
-                    onSelect(c.id);
-                  }}
-                >
-                  <div
-                    className="tlHandle left"
-                    onPointerDown={(e) => {
-                      e.stopPropagation();
-                      e.preventDefault(); // prevent native drag start
-                      onSelect(c.id);
-                      onBeginDrag(c.id, "in", e.clientX);
-                    }}
-                    aria-label="Trim in"
-                    draggable={false}
-                  />
-                  <div className="tlLabel">{c.label}</div>
-                  <div
-                    className="tlHandle right"
-                    onPointerDown={(e) => {
-                      e.stopPropagation();
-                      e.preventDefault(); // prevent native drag start
-                      onSelect(c.id);
-                      onBeginDrag(c.id, "out", e.clientX);
-                    }}
-                    aria-label="Trim out"
-                    draggable={false}
-                  />
-                </div>
-              );
-            })}
-          </div>
 
-          <div className="lane laneAudio" aria-label="Audio track" aria-hidden="true">
-            {timeline.clips.map((c) => {
-              const clipOffset = offsets.get(c.id) ?? 0;
-              const len = Math.max(0.001, c.sourceOut - c.sourceIn);
-              const left = clamp(clipOffset / duration, 0, 1);
-              const width = clamp(len / duration, 0.002, 1);
-              const asset = getAsset(c.assetId);
-              const ws = waveformStyle(asset, c);
-              const has = Boolean(asset?.hasAudio);
-              return (
-                <div
-                  key={`a-${c.id}`}
-                  className={`audioClip ${has ? "has" : "none"}`}
-                  style={{ left: pct(left), width: pct(width), ...(ws ?? {}) } as any}
-                />
-              );
-            })}
-          </div>
+            <div className={`lane laneAudio ${timeline.audioLinked === false ? "isEditable" : ""}`} aria-label="Audio track" role="list" ref={laneAudioRef}>
+              {audioClips.map((c) => {
+                const len = Math.max(0.001, c.sourceOut - c.sourceIn);
+                const left = clamp((c.start ?? 0) / duration, 0, 1);
+                const width = clamp(len / duration, 0.002, 1);
+                const asset = getAsset(c.assetId);
+                const ws = waveformStyle(asset, c);
+                const has = Boolean(asset?.hasAudio);
+                const editable = timeline.audioLinked === false && !String(c.id).startsWith("linked-");
+                const isSelected = editable && c.id === selectedAudioClipId;
+                return (
+                  <div
+                    key={c.id}
+                    className={`audioClip ${has ? "has" : "none"} ${isSelected ? "isSelected" : ""} ${draggingId === c.id ? "isDragging" : ""}`}
+                    style={{ left: pct(left), width: pct(width), ...(ws ?? {}) } as any}
+                    role="listitem"
+                    title={`${c.label} (${fmt(len)})`}
+                    draggable={editable}
+                    onDragStart={(e) => {
+                      if (!editable) return;
+                      onAnyDragStart({ kind: "audio_clip", clipId: c.id });
+                      setDraggingId(c.id);
+                      try {
+                        const raw = JSON.stringify({ kind: "audio_clip", clipId: c.id });
+                        e.dataTransfer.setData(DRAG_MIME, raw);
+                        e.dataTransfer.setData("text/plain", raw);
+                        e.dataTransfer.effectAllowed = "move";
+                      } catch {}
+                    }}
+                    onDragEnd={() => {
+                      setDraggingId(null);
+                      onAnyDragEnd();
+                    }}
+                    onPointerDown={(e) => {
+                      if (!editable) return;
+                      e.stopPropagation();
+                      onSelectAudio(c.id);
+                    }}
+                  />
+                );
+              })}
 
-          <div className="playhead" style={{ left: pct(playheadX) } as any} aria-hidden="true" />
-          {dropAt != null ? (
-            <div className="dropMarker" style={{ left: pct(clamp(dropAt / duration, 0, 1)) } as any} aria-hidden="true" />
-          ) : null}
-          {dropAt != null && dropPayload ? (() => {
-            const len = getGhostLenSeconds(dropPayload);
-            if (!len || !Number.isFinite(len) || len <= 0) return null;
-            const idx = computeDropIndex(dropAt);
-            const leftSeconds = indexToLeftSeconds(idx);
-            const left = clamp(leftSeconds / duration, 0, 1);
-            // When the timeline is empty, treat the ghost as a medium-size block.
-            const width = timeline.clips.length === 0 ? 0.35 : clamp(len / duration, 0.01, 0.9);
-            return (
-              <div
-                className="ghostClip"
-                style={{ left: pct(left), width: pct(width) } as any}
-                aria-hidden="true"
-              />
-            );
-          })() : null}
-          {snapFlashAt != null ? (
-            <div
-              className="snapFlash"
-              style={{ left: pct(clamp(snapFlashAt / duration, 0, 1)) } as any}
-              aria-hidden="true"
-            />
-          ) : null}
+              {dropAt != null && dropPayload && dropLane === "audio"
+                ? (() => {
+                    const len = getGhostLenSeconds(dropPayload);
+                    if (!len || !Number.isFinite(len) || len <= 0) return null;
+                    const left = clamp(dropAt / duration, 0, 1);
+                    const width = clamp(len / duration, 0.01, 0.9);
+                    return <div className="ghostClip" style={{ left: pct(left), width: pct(width) } as any} aria-hidden="true" />;
+                  })()
+                : null}
+            </div>
+
+            <div className="playhead" style={{ left: pct(playheadX) } as any} aria-hidden="true" />
+            {dropAt != null ? (
+              <div className="dropMarker" style={{ left: pct(clamp(dropAt / duration, 0, 1)) } as any} aria-hidden="true" />
+            ) : null}
+            {snapFlashAt != null ? (
+              <div className="snapFlash" style={{ left: pct(clamp(snapFlashAt / duration, 0, 1)) } as any} aria-hidden="true" />
+            ) : null}
+          </div>
         </div>
       </div>
     </div>

@@ -24,9 +24,24 @@ export type ProjectClip = {
   sourceOut: number;
 };
 
+export type AudioClip = {
+  id: string;
+  assetId: string;
+  label: string;
+  sourceIn: number;
+  sourceOut: number;
+  // Position on the project timeline (seconds).
+  start: number;
+};
+
 export type ProjectTimeline = {
   projectId: string;
   clips: ProjectClip[];
+  // Optional, for when audio is unlinked from video and becomes its own editable lane.
+  audioLinked?: boolean;
+  audioClips?: AudioClip[];
+  trackAudioMuted?: boolean;
+  trackVideoHidden?: boolean;
 };
 
 export type AssistantOperation =

@@ -417,6 +417,60 @@ body {
   gap: 10px;
 }
 
+.timelineStripGrid{
+  display: grid;
+  grid-template-columns: 84px 1fr;
+  gap: 10px;
+  align-items: stretch;
+}
+
+.trackRail{
+  height: 188px;
+  border-radius: 18px;
+  border: 1px solid rgba(255,255,255,0.08);
+  background: rgba(255,255,255,0.02);
+  padding: 10px;
+  display: grid;
+  grid-template-rows: 1fr 1fr;
+  gap: 10px;
+}
+
+.trackRailRow{
+  border-radius: 16px;
+  border: 1px solid rgba(255,255,255,0.06);
+  background: rgba(255,255,255,0.015);
+  display: grid;
+  align-content: center;
+  justify-items: center;
+  gap: 10px;
+  padding: 10px;
+}
+
+.trackLabel{
+  font-family: var(--mono);
+  font-size: 12px;
+  color: rgba(242,245,255,0.65);
+  letter-spacing: 0.02em;
+}
+
+.trackBtn{
+  width: 100%;
+  border-radius: 999px;
+  border: 1px solid rgba(255,255,255,0.12);
+  background: rgba(255,255,255,0.03);
+  color: rgba(242,245,255,0.86);
+  font-weight: 900;
+  font-size: 12px;
+  padding: 8px 10px;
+  cursor: pointer;
+  text-align: center;
+  white-space: nowrap;
+}
+.trackBtn.on{
+  border-color: rgba(93, 214, 255, 0.32);
+  background: rgba(93, 214, 255, 0.10);
+}
+
 .timelineStrip{
   position: relative;
   height: 188px;
@@ -449,6 +503,9 @@ body {
 }
 .laneAudio{
   background: rgba(155, 123, 255, 0.03);
+}
+.laneAudio.isEditable{
+  border-color: rgba(155, 123, 255, 0.22);
 }
 
 .timelineEmptyDrop{
@@ -598,6 +655,17 @@ body {
   border: 1px solid rgba(255,255,255,0.10);
   background: rgba(255,255,255,0.02);
   opacity: 0.9;
+}
+.audioClip[draggable="true"]{ cursor: grab; }
+.audioClip[draggable="true"]:active{ cursor: grabbing; }
+.audioClip.isDragging{
+  opacity: 0.6;
+  border-style: dashed;
+}
+.audioClip.isSelected{
+  border-color: rgba(155, 123, 255, 0.45);
+  background: rgba(155, 123, 255, 0.14);
+  box-shadow: 0 0 0 3px rgba(155, 123, 255, 0.10);
 }
 .audioClip.has{
   border-color: rgba(93, 214, 255, 0.18);
