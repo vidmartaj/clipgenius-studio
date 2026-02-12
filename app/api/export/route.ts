@@ -3,7 +3,8 @@ import { spawn } from "node:child_process";
 import { readFile, writeFile, mkdir } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import type { ProjectTimeline } from "../../../lib/types";
+import type { AudioClip, ProjectTimeline } from "../../../lib/types";
+import { projectDurationSeconds } from "../../../lib/timeline";
 
 export const runtime = "nodejs";
 
@@ -84,17 +85,34 @@ export async function POST(req: Request) {
   const outPath = path.join(outDir, outName);
 
   const scale = resolutionToScale(resolution);
+  const projectDuration = Math.max(0.001, projectDurationSeconds(timeline));
+
+  const unlinkedAudio = timeline.audioLinked === false && Array.isArray(timeline.audioClips);
+  const exportMuted = Boolean(timeline.trackAudioMuted);
+
+  const audioPlan =
+    unlinkedAudio && !exportMuted
+      ? await buildUnlinkedAudioPlan(timeline.audioClips ?? [], assetMap, projectDuration)
+      : null;
 
   // Re-encode for reliable cuts across keyframes + consistent output.
-  const args = [
-    "-hide_banner",
-    "-y",
-    "-f",
-    "concat",
-    "-safe",
-    "0",
-    "-i",
-    listPath,
+  // Notes:
+  // - In linked mode, we keep the concat demuxer audio (default mapping).
+  // - In unlinked mode, we map video from concat input + an audio mix built from AudioClips.
+  // - If the user mutes audio, we export video-only (no audio track).
+  const args: string[] = ["-hide_banner", "-y", "-f", "concat", "-safe", "0", "-i", listPath];
+
+  // Additional audio inputs + mix graph (unlinked audio only).
+  if (audioPlan) {
+    for (const p of audioPlan.inputPaths) args.push("-i", p);
+    args.push("-filter_complex", audioPlan.filterComplex);
+    args.push("-map", "0:v:0");
+    args.push("-map", audioPlan.mapAudioLabel);
+  } else if (exportMuted) {
+    args.push("-an");
+  }
+
+  args.push(
     "-vf",
     scale,
     "-c:v",
@@ -104,20 +122,141 @@ export async function POST(req: Request) {
     "-crf",
     "20",
     "-pix_fmt",
-    "yuv420p",
-    "-c:a",
-    "aac",
-    "-b:a",
-    "160k",
-    "-movflags",
-    "+faststart",
-    outPath
-  ];
+    "yuv420p"
+  );
+
+  if (audioPlan) {
+    args.push("-c:a", "aac", "-b:a", "160k");
+  } else if (!exportMuted) {
+    // Linked mode audio (or no audio stream). FFmpeg will ignore audio settings if there isn't an audio stream.
+    args.push("-c:a", "aac", "-b:a", "160k");
+  }
+
+  args.push("-movflags", "+faststart", outPath);
 
   await run("ffmpeg", args, { timeoutMs: 10 * 60_000 });
 
   return NextResponse.json({
     exportUrl: `/exports/${outName}`
+  });
+}
+
+async function buildUnlinkedAudioPlan(audioClips: AudioClip[], assetMap: Map<string, string>, projectDuration: number) {
+  // De-dupe inputs by source file path to avoid opening the same file repeatedly.
+  // We'll reference them by input index in filter_complex.
+  const inputs: string[] = [];
+  const inputIndexBySrc = new Map<string, number>();
+
+  const normalized: Array<{
+    inputIndex: number;
+    sourceIn: number;
+    sourceOut: number;
+    start: number;
+  }> = [];
+
+  for (const c of audioClips) {
+    if (!c?.assetId) continue;
+    const url = assetMap.get(c.assetId);
+    if (!url) continue;
+    const src = path.join(process.cwd(), "public", url.replace(/^\/+/, ""));
+
+    const inpoint = Number(c.sourceIn);
+    const outpoint = Number(c.sourceOut);
+    const start = Number(c.start);
+    if (!Number.isFinite(inpoint) || !Number.isFinite(outpoint) || !Number.isFinite(start)) continue;
+    if (outpoint <= inpoint + 0.05) continue;
+
+    const hasAudio = await probeHasAudio(src);
+    if (!hasAudio) continue;
+
+    let inputIndex = inputIndexBySrc.get(src);
+    if (inputIndex == null) {
+      inputIndex = inputs.length;
+      inputs.push(src);
+      inputIndexBySrc.set(src, inputIndex);
+    }
+
+    const len = Math.max(0.05, outpoint - inpoint);
+    const boundedStart = clamp(start, 0, Math.max(0, projectDuration - len));
+
+    normalized.push({
+      inputIndex,
+      sourceIn: Math.max(0, inpoint),
+      sourceOut: Math.max(0, outpoint),
+      start: boundedStart
+    });
+  }
+
+  if (normalized.length === 0) return null;
+
+  // Build filter graph.
+  // Inputs:
+  //  - 0: concat list (video)
+  //  - 1..N: unique audio source files
+  const chains: string[] = [];
+  const labels: string[] = [];
+
+  for (let i = 0; i < normalized.length; i++) {
+    const c = normalized[i];
+    const input = 1 + c.inputIndex;
+    const label = `ac${i}`;
+    const delayMs = Math.max(0, Math.round(c.start * 1000));
+    // adelay expects per-channel delays; provide the same delay for at least 2 channels.
+    const delayArg = `${delayMs}|${delayMs}`;
+    chains.push(
+      `[${input}:a]` +
+        `atrim=start=${c.sourceIn.toFixed(3)}:end=${c.sourceOut.toFixed(3)},` +
+        `asetpts=PTS-STARTPTS,` +
+        `adelay=${delayArg}:all=1` +
+        `[${label}]`
+    );
+    labels.push(`[${label}]`);
+  }
+
+  const mixLabel = "a_mix";
+  if (labels.length === 1) {
+    chains.push(`${labels[0]}aresample=async=1:first_pts=0,atrim=0:${projectDuration.toFixed(3)},asetpts=PTS-STARTPTS[${mixLabel}]`);
+  } else {
+    chains.push(
+      `${labels.join("")}` +
+        `amix=inputs=${labels.length}:normalize=0:dropout_transition=0,` +
+        `aresample=async=1:first_pts=0,` +
+        `atrim=0:${projectDuration.toFixed(3)},` +
+        `asetpts=PTS-STARTPTS` +
+        `[${mixLabel}]`
+    );
+  }
+
+  const filterComplex = chains.join(";");
+
+  return {
+    inputPaths: inputs,
+    filterComplex,
+    mapAudioLabel: `[${mixLabel}]`
+  };
+}
+
+function probeHasAudio(src: string) {
+  // Returns true if ffprobe finds at least one audio stream.
+  return new Promise<boolean>((resolve) => {
+    const child = spawn("ffprobe", [
+      "-v",
+      "error",
+      "-select_streams",
+      "a:0",
+      "-show_entries",
+      "stream=codec_type",
+      "-of",
+      "csv=p=0",
+      src
+    ]);
+    let out = "";
+    child.stdout?.on("data", (d) => (out += String(d)));
+    child.on("error", () => resolve(false));
+    child.on("close", (code) => {
+      if (code !== 0) return resolve(false);
+      resolve(Boolean(out.trim()));
+    });
   });
 }
 
