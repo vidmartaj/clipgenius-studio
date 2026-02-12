@@ -681,6 +681,62 @@ body {
   font-size: 12px;
   opacity: 0.85;
 }
+
+.audioMuteBtn{
+  margin-left: auto;
+  border-radius: 999px;
+  border: 1px solid rgba(255,255,255,0.14);
+  background: rgba(0,0,0,0.18);
+  color: rgba(242,245,255,0.85);
+  font-weight: 900;
+  font-size: 11px;
+  padding: 6px 10px;
+  cursor: pointer;
+}
+.audioMuteBtn.on{
+  border-color: rgba(255,255,255,0.22);
+  background: rgba(255,255,255,0.08);
+  color: rgba(242,245,255,0.92);
+}
+
+.audioVolLine{
+  position: absolute;
+  left: 10px;
+  right: 10px;
+  top: var(--volY, 50%);
+  height: 2px;
+  background: rgba(242,245,255,0.42);
+  box-shadow: 0 0 0 1px rgba(0,0,0,0.25);
+  border-radius: 999px;
+  pointer-events: none;
+}
+.audioVolLine::after{
+  content:"";
+  position: absolute;
+  right: 0;
+  top: 50%;
+  transform: translate(50%, -50%);
+  width: 8px;
+  height: 8px;
+  border-radius: 999px;
+  background: rgba(93,214,255,0.92);
+  box-shadow: 0 0 12px rgba(93,214,255,0.35);
+}
+
+.audioVolHit{
+  position: absolute;
+  left: 0;
+  right: 0;
+  top: calc(var(--volY, 50%) - 12px);
+  height: 24px;
+  cursor: ns-resize;
+  background: transparent;
+}
+.audioVolHit:focus-visible{
+  outline: 2px solid rgba(93,214,255,0.55);
+  outline-offset: 2px;
+  border-radius: 10px;
+}
 .audioClip.has{
   border-color: rgba(93, 214, 255, 0.18);
   background-color: rgba(93, 214, 255, 0.05);

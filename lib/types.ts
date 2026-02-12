@@ -32,6 +32,9 @@ export type AudioClip = {
   sourceOut: number;
   // Position on the project timeline (seconds).
   start: number;
+  // Linear gain multiplier. 1 = 100%.
+  volume?: number;
+  muted?: boolean;
 };
 
 export type ProjectTimeline = {

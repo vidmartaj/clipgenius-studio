@@ -152,10 +152,12 @@ async function buildUnlinkedAudioPlan(audioClips: AudioClip[], assetMap: Map<str
     sourceIn: number;
     sourceOut: number;
     start: number;
+    volume: number;
   }> = [];
 
   for (const c of audioClips) {
     if (!c?.assetId) continue;
+    if (c.muted) continue;
     const url = assetMap.get(c.assetId);
     if (!url) continue;
     const src = path.join(process.cwd(), "public", url.replace(/^\/+/, ""));
@@ -165,6 +167,10 @@ async function buildUnlinkedAudioPlan(audioClips: AudioClip[], assetMap: Map<str
     const start = Number(c.start);
     if (!Number.isFinite(inpoint) || !Number.isFinite(outpoint) || !Number.isFinite(start)) continue;
     if (outpoint <= inpoint + 0.05) continue;
+
+    const volumeRaw = (c.volume ?? 1) as any;
+    const volume = clamp(Number.isFinite(volumeRaw) ? volumeRaw : 1, 0, 2);
+    if (volume <= 0) continue;
 
     const hasAudio = await probeHasAudio(src);
     if (!hasAudio) continue;
@@ -183,7 +189,8 @@ async function buildUnlinkedAudioPlan(audioClips: AudioClip[], assetMap: Map<str
       inputIndex,
       sourceIn: Math.max(0, inpoint),
       sourceOut: Math.max(0, outpoint),
-      start: boundedStart
+      start: boundedStart,
+      volume
     });
   }
 
@@ -207,6 +214,7 @@ async function buildUnlinkedAudioPlan(audioClips: AudioClip[], assetMap: Map<str
       `[${input}:a]` +
         `atrim=start=${c.sourceIn.toFixed(3)}:end=${c.sourceOut.toFixed(3)},` +
         `asetpts=PTS-STARTPTS,` +
+        `volume=${c.volume.toFixed(3)},` +
         `adelay=${delayArg}:all=1` +
         `[${label}]`
     );

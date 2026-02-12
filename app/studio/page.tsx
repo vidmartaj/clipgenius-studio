@@ -140,7 +140,9 @@ export default function StudioPage() {
       label: c.label,
       sourceIn: c.sourceIn,
       sourceOut: c.sourceOut,
-      start: offsets.get(c.id) ?? 0
+      start: offsets.get(c.id) ?? 0,
+      volume: 1,
+      muted: false
     }));
   }, [timeline, offsets]);
 
@@ -187,9 +189,12 @@ export default function StudioPage() {
         const len = Math.max(minLen, sourceOut - sourceIn);
         const startRaw = Number.isFinite(c.start) ? c.start : 0;
         const start = clamp(startRaw, 0, Math.max(0, projectDuration - len));
-        if (sourceIn === c.sourceIn && sourceOut === c.sourceOut && start === c.start) return c;
+        const volumeRaw = c.volume ?? 1;
+        const volume = clamp(Number.isFinite(volumeRaw) ? volumeRaw : 1, 0, 2);
+        const muted = Boolean(c.muted);
+        if (sourceIn === c.sourceIn && sourceOut === c.sourceOut && start === c.start && volume === (c.volume ?? 1) && muted === Boolean(c.muted)) return c;
         changed = true;
-        return { ...c, sourceIn, sourceOut, start };
+        return { ...c, sourceIn, sourceOut, start, volume, muted };
       });
     }
 
@@ -216,7 +221,9 @@ export default function StudioPage() {
       label: cleanName(a.name),
       sourceIn: 0,
       sourceOut: a.durationSeconds,
-      start: 0
+      start: 0,
+      volume: 1,
+      muted: false
     };
   }
 
@@ -500,6 +507,7 @@ export default function StudioPage() {
     const active = new Set<string>();
     for (const c of timeline.audioClips) {
       if (!c || !c.id || typeof c.id !== "string") continue;
+      if (c.muted) continue;
       const asset = assetsById.get(c.assetId);
       if (!asset?.videoUrl || !asset.hasAudio) continue;
       const len = Math.max(0.001, Number(c.sourceOut) - Number(c.sourceIn));
@@ -512,7 +520,8 @@ export default function StudioPage() {
 
       const el = getOrCreateUnlinkedAudioEl(c.id, asset.videoUrl);
       el.muted = false;
-      el.volume = 1;
+      const vol = clamp(Number.isFinite(c.volume as any) ? (c.volume as any) : 1, 0, 2);
+      el.volume = clamp(vol / 2, 0, 1);
       // Keep audio in sync with the timeline playhead.
       if (Number.isFinite(el.currentTime) && Math.abs(el.currentTime - desired) > 0.25) {
         try {
@@ -735,7 +744,9 @@ export default function StudioPage() {
         label: c.label,
         sourceIn: c.sourceIn,
         sourceOut: c.sourceOut,
-        start
+        start,
+        volume: 1,
+        muted: false
       });
     }
 
@@ -947,7 +958,11 @@ export default function StudioPage() {
     };
   }
 
-  function updateAudioClipById(t: ProjectTimeline, clipId: string, patch: Partial<Pick<AudioClip, "sourceIn" | "sourceOut" | "start" | "label">>) {
+  function updateAudioClipById(
+    t: ProjectTimeline,
+    clipId: string,
+    patch: Partial<Pick<AudioClip, "sourceIn" | "sourceOut" | "start" | "label" | "volume" | "muted">>
+  ) {
     if (t.audioLinked !== false || !Array.isArray(t.audioClips)) return t;
     const minLen = 0.2;
     const projectDuration = Math.max(0.001, projectDurationSeconds(t));
@@ -962,7 +977,10 @@ export default function StudioPage() {
       const len = Math.max(minLen, sourceOut - sourceIn);
       const startRaw = patch.start != null ? patch.start : c.start;
       const start = clamp(Number.isFinite(startRaw) ? startRaw : 0, 0, Math.max(0, projectDuration - len));
-      return { ...c, ...patch, sourceIn, sourceOut, start };
+      const volumeRaw = patch.volume != null ? patch.volume : c.volume ?? 1;
+      const volume = clamp(Number.isFinite(volumeRaw) ? volumeRaw : 1, 0, 2);
+      const muted = patch.muted != null ? Boolean(patch.muted) : Boolean(c.muted);
+      return { ...c, ...patch, sourceIn, sourceOut, start, volume, muted };
     });
     return { ...t, audioClips: next };
   }
@@ -1502,6 +1520,23 @@ export default function StudioPage() {
                   selectedAudioClipId
                 });
               }}
+              onToggleAudioClipMute={(id) => {
+                if (timeline.audioLinked !== false || !Array.isArray(timeline.audioClips)) return;
+                const cur = timeline.audioClips.find((c) => c.id === id);
+                if (!cur) return;
+                const next = updateAudioClipById(timeline, id, { muted: !Boolean(cur.muted) });
+                applyWithHistory({ timeline: next, selectedClipId, selectedAudioClipId: id });
+              }}
+              getHistoryState={() => ({ timeline, selectedClipId, selectedAudioClipId })}
+              onCommitHistory={(prev) => {
+                setPast((p) => [...p, prev].slice(-80));
+                setFuture([]);
+                setExportUrl(null);
+                setExportError(null);
+              }}
+              onPatchAudioClipLive={(id, patch) => {
+                setTimeline((t) => updateAudioClipById(t, id, patch));
+              }}
               onScrub={(t, play) => scrubToProjectTime(t, play)}
               onBeginDrag={(clipId, handle, startX) => beginTrimDrag(clipId, handle, startX)}
               onBeginAudioDrag={(clipId, handle, startX) => beginAudioTrimDrag(clipId, handle, startX)}
@@ -1559,6 +1594,10 @@ function TimelineStrip({
   onSelectAudio,
   onToggleAudioLink,
   onToggleTrackMute,
+  onToggleAudioClipMute,
+  getHistoryState,
+  onCommitHistory,
+  onPatchAudioClipLive,
   onScrub,
   onBeginDrag,
   onBeginAudioDrag,
@@ -1586,6 +1625,10 @@ function TimelineStrip({
   onSelectAudio: (id: string) => void;
   onToggleAudioLink: () => void;
   onToggleTrackMute: () => void;
+  onToggleAudioClipMute: (id: string) => void;
+  getHistoryState: () => HistoryState;
+  onCommitHistory: (prev: HistoryState) => void;
+  onPatchAudioClipLive: (id: string, patch: Partial<Pick<AudioClip, "volume">>) => void;
   onScrub: (t: number, play: boolean) => void;
   onBeginDrag: (clipId: string, handle: "in" | "out", startX: number) => void;
   onBeginAudioDrag: (clipId: string, handle: "in" | "out", startX: number) => void;
@@ -1608,6 +1651,7 @@ function TimelineStrip({
   const [snapFlashAt, setSnapFlashAt] = useState<number | null>(null);
   const laneVideoRef = useRef<HTMLDivElement | null>(null);
   const laneAudioRef = useRef<HTMLDivElement | null>(null);
+  const audioVolDragRef = useRef<null | { clipId: string; pointerId: number; prev: HistoryState }>(null);
 
   function clientXToProjectTime(clientX: number) {
     const el = refEl.current;
@@ -1710,6 +1754,19 @@ function TimelineStrip({
     const a = getAsset(payload.assetId);
     if (!a?.hasAudio) return "video";
     return "audio";
+  }
+
+  function volumeToYPercent(volume: number | undefined) {
+    const v = clamp(Number.isFinite(volume as any) ? (volume as any) : 1, 0, 2);
+    const y = (1 - v / 2) * 100;
+    return clamp(y, 8, 92);
+  }
+
+  function yClientToVolume(clientY: number, rect: DOMRect) {
+    const y = clamp((clientY - rect.top) / Math.max(1, rect.height), 0, 1);
+    // Top = 200%, bottom = 0%
+    const v = (1 - y) * 2;
+    return clamp(v, 0, 2);
   }
 
   return (
@@ -1899,11 +1956,12 @@ function TimelineStrip({
                 const has = Boolean(asset?.hasAudio);
                 const editable = timeline.audioLinked === false && !String(c.id).startsWith("linked-");
                 const isSelected = editable && c.id === selectedAudioClipId;
+                const yPct = volumeToYPercent(c.volume);
                 return (
                   <div
                     key={c.id}
                     className={`audioClip ${has ? "has" : "none"} ${isSelected ? "isSelected" : ""} ${draggingId === c.id ? "isDragging" : ""}`}
-                    style={{ left: pct(left), width: pct(width), ...(ws ?? {}) } as any}
+                    style={{ left: pct(left), width: pct(width), ...(ws ?? {}), ["--volY" as any]: `${yPct.toFixed(2)}%` } as any}
                     role="listitem"
                     title={`${c.label} (${fmt(len)})`}
                     draggable={editable}
@@ -1942,6 +2000,19 @@ function TimelineStrip({
                           draggable={false}
                         />
                         <div className="tlLabel audioLabel">{c.label}</div>
+                        <button
+                          type="button"
+                          className={`audioMuteBtn ${c.muted ? "on" : ""}`}
+                          onPointerDown={(e) => e.stopPropagation()}
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            onToggleAudioClipMute(c.id);
+                          }}
+                          aria-pressed={Boolean(c.muted)}
+                          title={c.muted ? "Unmute clip" : "Mute clip"}
+                        >
+                          {c.muted ? "Muted" : "Mute"}
+                        </button>
                         <div
                           className="tlHandle right audioHandle"
                           onPointerDown={(e) => {
@@ -1952,6 +2023,64 @@ function TimelineStrip({
                           }}
                           aria-label="Trim audio out"
                           draggable={false}
+                        />
+                        <div className="audioVolLine" aria-hidden="true" />
+                        <div
+                          className="audioVolHit"
+                          role="slider"
+                          aria-label="Clip volume"
+                          aria-valuemin={0}
+                          aria-valuemax={200}
+                          aria-valuenow={Math.round(clamp((c.volume ?? 1) * 100, 0, 200))}
+                          tabIndex={0}
+                          onPointerDown={(e) => {
+                            e.stopPropagation();
+                            e.preventDefault();
+                            const rect = (e.currentTarget.parentElement as HTMLElement | null)?.getBoundingClientRect();
+                            if (!rect) return;
+                            const prev = getHistoryState();
+                            audioVolDragRef.current = { clipId: c.id, pointerId: e.pointerId, prev };
+                            (e.currentTarget as HTMLElement).setPointerCapture?.(e.pointerId);
+                            const v = yClientToVolume(e.clientY, rect);
+                            onPatchAudioClipLive(c.id, { volume: v });
+                          }}
+                          onPointerMove={(e) => {
+                            const d = audioVolDragRef.current;
+                            if (!d || d.clipId !== c.id || d.pointerId !== e.pointerId) return;
+                            const rect = (e.currentTarget.parentElement as HTMLElement | null)?.getBoundingClientRect();
+                            if (!rect) return;
+                            const v = yClientToVolume(e.clientY, rect);
+                            onPatchAudioClipLive(c.id, { volume: v });
+                          }}
+                          onPointerUp={(e) => {
+                            const d = audioVolDragRef.current;
+                            if (!d || d.clipId !== c.id || d.pointerId !== e.pointerId) return;
+                            audioVolDragRef.current = null;
+                            try {
+                              (e.currentTarget as HTMLElement).releasePointerCapture?.(e.pointerId);
+                            } catch {}
+                            onCommitHistory(d.prev);
+                          }}
+                          onPointerCancel={(e) => {
+                            const d = audioVolDragRef.current;
+                            if (!d || d.clipId !== c.id || d.pointerId !== e.pointerId) return;
+                            audioVolDragRef.current = null;
+                            try {
+                              (e.currentTarget as HTMLElement).releasePointerCapture?.(e.pointerId);
+                            } catch {}
+                            onCommitHistory(d.prev);
+                          }}
+                          onKeyDown={(e) => {
+                            // basic keyboard volume steps
+                            if (e.key !== "ArrowUp" && e.key !== "ArrowDown") return;
+                            e.preventDefault();
+                            const dir = e.key === "ArrowUp" ? 1 : -1;
+                            const cur = clamp(Number.isFinite(c.volume as any) ? (c.volume as any) : 1, 0, 2);
+                            const next = clamp(cur + dir * 0.05, 0, 2);
+                            const prev = getHistoryState();
+                            onPatchAudioClipLive(c.id, { volume: next });
+                            onCommitHistory(prev);
+                          }}
                         />
                       </>
                     ) : null}
