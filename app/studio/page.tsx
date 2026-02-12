@@ -50,6 +50,8 @@ export default function StudioPage() {
   const switchingRef = useRef(false);
   const currentDragRef = useRef<DragPayload | null>(null);
   const altDownRef = useRef(false);
+  const unlinkedAudioElsRef = useRef<Map<string, HTMLAudioElement>>(new Map());
+  const playheadRef = useRef(0);
 
   const [assets, setAssets] = useState<Asset[]>([]);
   const assetsById = useMemo(() => new Map(assets.map((a) => [a.assetId, a])), [assets]);
@@ -121,6 +123,10 @@ export default function StudioPage() {
 
   const [isPreviewing, setIsPreviewing] = useState(false);
   const [playheadProjectTime, setPlayheadProjectTime] = useState(0);
+
+  useEffect(() => {
+    playheadRef.current = playheadProjectTime;
+  }, [playheadProjectTime]);
 
   const duration = useMemo(() => projectDurationSeconds(timeline), [timeline]);
   const offsets = useMemo(() => projectClipOffsets(timeline), [timeline]);
@@ -362,12 +368,13 @@ export default function StudioPage() {
 
   // Track mute: controls preview audio immediately.
   useEffect(() => {
-    const muted = Boolean(timeline.trackAudioMuted);
+    // When audio is unlinked, we mute the video element to avoid double-audio.
+    const muted = Boolean(timeline.trackAudioMuted) || timeline.audioLinked === false;
     const fg = videoRef.current;
     const bg = bgVideoRef.current;
     if (fg) fg.muted = muted;
     if (bg) bg.muted = true; // background layer is always muted
-  }, [timeline.trackAudioMuted]);
+  }, [timeline.trackAudioMuted, timeline.audioLinked]);
 
   // ---- Undo / redo ----
   function applyWithHistory(next: { timeline: ProjectTimeline; selectedClipId: string | null; selectedAudioClipId?: string | null }) {
@@ -450,6 +457,86 @@ export default function StudioPage() {
   }, []);
 
   // ---- Player helpers ----
+  function pauseAllUnlinkedAudio() {
+    for (const el of unlinkedAudioElsRef.current.values()) {
+      try {
+        el.pause();
+      } catch {}
+    }
+  }
+
+  function getOrCreateUnlinkedAudioEl(id: string, src: string) {
+    const map = unlinkedAudioElsRef.current;
+    const existing = map.get(id);
+    if (existing) {
+      if (!existing.src || !existing.src.endsWith(src)) {
+        existing.src = src;
+        existing.load?.();
+      }
+      return existing;
+    }
+    const el = new Audio();
+    el.preload = "auto";
+    el.src = src;
+    el.crossOrigin = "anonymous";
+    map.set(id, el);
+    return el;
+  }
+
+  function syncUnlinkedAudio(projectTime: number, play: boolean) {
+    if (timeline.audioLinked !== false) {
+      pauseAllUnlinkedAudio();
+      return;
+    }
+    if (timeline.trackAudioMuted) {
+      pauseAllUnlinkedAudio();
+      return;
+    }
+    if (!Array.isArray(timeline.audioClips) || timeline.audioClips.length === 0) {
+      pauseAllUnlinkedAudio();
+      return;
+    }
+
+    const active = new Set<string>();
+    for (const c of timeline.audioClips) {
+      if (!c || !c.id || typeof c.id !== "string") continue;
+      const asset = assetsById.get(c.assetId);
+      if (!asset?.videoUrl || !asset.hasAudio) continue;
+      const len = Math.max(0.001, Number(c.sourceOut) - Number(c.sourceIn));
+      const start = Math.max(0, Number(c.start) || 0);
+      const end = start + len;
+      if (projectTime < start || projectTime >= end) continue;
+
+      const within = clamp(projectTime - start, 0, len);
+      const desired = clamp(Number(c.sourceIn) + within, 0, Number.isFinite(asset.durationSeconds) ? asset.durationSeconds : Number.POSITIVE_INFINITY);
+
+      const el = getOrCreateUnlinkedAudioEl(c.id, asset.videoUrl);
+      el.muted = false;
+      el.volume = 1;
+      // Keep audio in sync with the timeline playhead.
+      if (Number.isFinite(el.currentTime) && Math.abs(el.currentTime - desired) > 0.25) {
+        try {
+          el.currentTime = desired;
+        } catch {}
+      }
+
+      active.add(c.id);
+      if (play) {
+        if (el.paused) el.play().catch(() => {});
+      } else {
+        el.pause();
+      }
+    }
+
+    // Pause any non-active audio elements.
+    for (const [id, el] of unlinkedAudioElsRef.current.entries()) {
+      if (active.has(id)) continue;
+      try {
+        el.pause();
+      } catch {}
+    }
+  }
+
   async function ensurePlayerOnAsset(asset: Asset, seekTo: number, play: boolean) {
     const nextSrc = asset.videoUrl;
     pendingSeekRef.current = { expectedSrc: nextSrc, time: seekTo, play };
@@ -716,6 +803,7 @@ export default function StudioPage() {
     if (v) v.pause();
     const bg = bgVideoRef.current;
     if (bg) bg.pause();
+    pauseAllUnlinkedAudio();
     switchingRef.current = false;
   }
 
@@ -784,6 +872,26 @@ export default function StudioPage() {
       v.removeEventListener("timeupdate", onTimeUpdate);
     };
   }, [timeline, duration, offsets, assetsById]);
+
+  // While previewing, drive unlinked audio playback from the project playhead.
+  useEffect(() => {
+    if (!isPreviewing) {
+      pauseAllUnlinkedAudio();
+      return;
+    }
+    if (timeline.audioLinked !== false || timeline.trackAudioMuted) {
+      pauseAllUnlinkedAudio();
+      return;
+    }
+
+    let raf = 0;
+    const tick = () => {
+      syncUnlinkedAudio(playheadRef.current, true);
+      raf = window.requestAnimationFrame(tick);
+    };
+    raf = window.requestAnimationFrame(tick);
+    return () => window.cancelAnimationFrame(raf);
+  }, [isPreviewing, timeline.audioLinked, timeline.trackAudioMuted, timeline.audioClips, assetsById]);
 
   // Keep playhead visible while playing through the timeline.
   useEffect(() => {
@@ -914,6 +1022,7 @@ export default function StudioPage() {
           if (v) v.pause();
           const bg = bgVideoRef.current;
           if (bg) bg.pause();
+          syncUnlinkedAudio(t, false);
           // Avoid reloading sources on every mouse move: seek directly when possible.
           const seekTo = c.sourceIn + within;
           const fg = videoRef.current;
@@ -938,6 +1047,7 @@ export default function StudioPage() {
         };
         setIsPreviewing(true);
         await ensurePlayerOnAsset(asset, c.sourceIn + within, true);
+        syncUnlinkedAudio(t, true);
         return;
       }
       acc += len;
