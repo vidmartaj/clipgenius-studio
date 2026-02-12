@@ -22,6 +22,9 @@ export type ProjectClip = {
   label: string;
   sourceIn: number;
   sourceOut: number;
+  // Audio controls for linked audio mode (gain multiplier; 1 = 100%).
+  audioVolume?: number;
+  audioMuted?: boolean;
 };
 
 export type AudioClip = {

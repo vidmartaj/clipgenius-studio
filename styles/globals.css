@@ -682,21 +682,9 @@ body {
   opacity: 0.85;
 }
 
-.audioMuteBtn{
-  margin-left: auto;
-  border-radius: 999px;
-  border: 1px solid rgba(255,255,255,0.14);
-  background: rgba(0,0,0,0.18);
-  color: rgba(242,245,255,0.85);
-  font-weight: 900;
-  font-size: 11px;
-  padding: 6px 10px;
-  cursor: pointer;
-}
-.audioMuteBtn.on{
-  border-color: rgba(255,255,255,0.22);
-  background: rgba(255,255,255,0.08);
-  color: rgba(242,245,255,0.92);
+.audioClip.isMuted{
+  opacity: 0.6;
+  filter: saturate(0.7);
 }
 
 .audioVolLine{
@@ -710,6 +698,9 @@ body {
   border-radius: 999px;
   pointer-events: none;
 }
+.audioClip.isMuted .audioVolLine{
+  background: rgba(242,245,255,0.22);
+}
 .audioVolLine::after{
   content:"";
   position: absolute;
@@ -721,6 +712,10 @@ body {
   border-radius: 999px;
   background: rgba(93,214,255,0.92);
   box-shadow: 0 0 12px rgba(93,214,255,0.35);
+}
+.audioClip.isMuted .audioVolLine::after{
+  background: rgba(255,255,255,0.45);
+  box-shadow: 0 0 10px rgba(0,0,0,0.25);
 }
 
 .audioVolHit{

@@ -90,10 +90,18 @@ export async function POST(req: Request) {
   const unlinkedAudio = timeline.audioLinked === false && Array.isArray(timeline.audioClips);
   const exportMuted = Boolean(timeline.trackAudioMuted);
 
+  const linkedNeedsMix =
+    !unlinkedAudio &&
+    !exportMuted &&
+    Array.isArray(timeline.clips) &&
+    timeline.clips.some((c) => Boolean(c.audioMuted) || Math.abs((c.audioVolume ?? 1) - 1) > 0.001);
+
   const audioPlan =
-    unlinkedAudio && !exportMuted
+    !exportMuted && unlinkedAudio
       ? await buildUnlinkedAudioPlan(timeline.audioClips ?? [], assetMap, projectDuration)
-      : null;
+      : !exportMuted && linkedNeedsMix
+        ? await buildLinkedAudioPlan(timeline.clips ?? [], assetMap, projectDuration)
+        : null;
 
   // Re-encode for reliable cuts across keyframes + consistent output.
   // Notes:
@@ -139,6 +147,32 @@ export async function POST(req: Request) {
   return NextResponse.json({
     exportUrl: `/exports/${outName}`
   });
+}
+
+async function buildLinkedAudioPlan(videoClips: ProjectTimeline["clips"], assetMap: Map<string, string>, projectDuration: number) {
+  // Build a derived audio lane from the video timeline so we can apply per-clip volume/mute.
+  const derived: AudioClip[] = [];
+  let acc = 0;
+  for (const c of videoClips) {
+    const inpoint = Number(c.sourceIn);
+    const outpoint = Number(c.sourceOut);
+    if (!Number.isFinite(inpoint) || !Number.isFinite(outpoint)) continue;
+    if (outpoint <= inpoint + 0.05) continue;
+    const len = Math.max(0.05, outpoint - inpoint);
+    const start = clamp(acc, 0, Math.max(0, projectDuration - len));
+    acc += len;
+    derived.push({
+      id: `linked-${c.id}`,
+      assetId: c.assetId,
+      label: c.label,
+      sourceIn: inpoint,
+      sourceOut: outpoint,
+      start,
+      volume: clamp(Number.isFinite(c.audioVolume as any) ? (c.audioVolume as any) : 1, 0, 2),
+      muted: Boolean(c.audioMuted)
+    });
+  }
+  return buildUnlinkedAudioPlan(derived, assetMap, projectDuration);
 }
 
 async function buildUnlinkedAudioPlan(audioClips: AudioClip[], assetMap: Map<string, string>, projectDuration: number) {
