@@ -655,6 +655,11 @@ body {
   border: 1px solid rgba(255,255,255,0.10);
   background: rgba(255,255,255,0.02);
   opacity: 0.9;
+  display:flex;
+  align-items:center;
+  gap: 10px;
+  padding: 0 10px;
+  overflow: hidden;
 }
 .audioClip[draggable="true"]{ cursor: grab; }
 .audioClip[draggable="true"]:active{ cursor: grabbing; }
@@ -666,6 +671,15 @@ body {
   border-color: rgba(155, 123, 255, 0.45);
   background: rgba(155, 123, 255, 0.14);
   box-shadow: 0 0 0 3px rgba(155, 123, 255, 0.10);
+}
+
+.audioHandle{
+  height: 60%;
+  background: rgba(242,245,255,0.26);
+}
+.audioLabel{
+  font-size: 12px;
+  opacity: 0.85;
 }
 .audioClip.has{
   border-color: rgba(93, 214, 255, 0.18);

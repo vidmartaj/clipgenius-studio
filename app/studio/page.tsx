@@ -917,6 +917,93 @@ export default function StudioPage() {
     didMove: boolean;
   }>(null);
 
+  // ---- Audio trim drag (unlinked audio lane) ----
+  const audioDragRef = useRef<null | {
+    clipId: string;
+    handle: "in" | "out";
+    startX: number;
+    startIn: number;
+    startOut: number;
+    secondsPerPx: number;
+    prevState: HistoryState;
+    didMove: boolean;
+  }>(null);
+
+  function beginAudioTrimDrag(clipId: string, handle: "in" | "out", startX: number) {
+    if (timeline.audioLinked !== false || !Array.isArray(timeline.audioClips)) return;
+    const el = stripRef.current;
+    const clip = timeline.audioClips.find((c) => c.id === clipId);
+    if (!el || !clip) return;
+    const secondsPerPx = duration / Math.max(1, el.scrollWidth || el.getBoundingClientRect().width);
+    audioDragRef.current = {
+      clipId,
+      handle,
+      startX,
+      startIn: clip.sourceIn,
+      startOut: clip.sourceOut,
+      secondsPerPx,
+      prevState: { timeline, selectedClipId, selectedAudioClipId },
+      didMove: false
+    };
+  }
+
+  function updateAudioClipById(t: ProjectTimeline, clipId: string, patch: Partial<Pick<AudioClip, "sourceIn" | "sourceOut" | "start" | "label">>) {
+    if (t.audioLinked !== false || !Array.isArray(t.audioClips)) return t;
+    const minLen = 0.2;
+    const projectDuration = Math.max(0.001, projectDurationSeconds(t));
+    const next = t.audioClips.map((c) => {
+      if (c.id !== clipId) return c;
+      const asset = assetsById.get(c.assetId);
+      const maxOut = asset?.durationSeconds || Number.POSITIVE_INFINITY;
+      const nextIn = patch.sourceIn != null ? patch.sourceIn : c.sourceIn;
+      const nextOut = patch.sourceOut != null ? patch.sourceOut : c.sourceOut;
+      const sourceIn = clamp(nextIn, 0, Math.max(0, maxOut - minLen));
+      const sourceOut = clamp(nextOut, sourceIn + minLen, maxOut);
+      const len = Math.max(minLen, sourceOut - sourceIn);
+      const startRaw = patch.start != null ? patch.start : c.start;
+      const start = clamp(Number.isFinite(startRaw) ? startRaw : 0, 0, Math.max(0, projectDuration - len));
+      return { ...c, ...patch, sourceIn, sourceOut, start };
+    });
+    return { ...t, audioClips: next };
+  }
+
+  function onAudioTrimMove(clientX: number) {
+    const d = audioDragRef.current;
+    if (!d) return;
+    if (timeline.audioLinked !== false || !Array.isArray(timeline.audioClips)) return;
+    const clip = timeline.audioClips.find((c) => c.id === d.clipId);
+    if (!clip) return;
+    const asset = assetsById.get(clip.assetId);
+    const maxOut = asset?.durationSeconds || Number.POSITIVE_INFINITY;
+    const dx = clientX - d.startX;
+    const delta = dx * d.secondsPerPx;
+    const minLen = 0.2;
+
+    let nextIn = clip.sourceIn;
+    let nextOut = clip.sourceOut;
+    const startOutBounded = Math.min(d.startOut, maxOut);
+    if (d.handle === "in") {
+      nextIn = clamp(d.startIn + delta, 0, startOutBounded - minLen);
+    }
+    if (d.handle === "out") {
+      nextOut = clamp(d.startOut + delta, d.startIn + minLen, maxOut);
+    }
+
+    d.didMove = true;
+    setTimeline((t) => updateAudioClipById(t, d.clipId, { sourceIn: nextIn, sourceOut: nextOut }));
+  }
+
+  function endAudioTrimDrag() {
+    const d = audioDragRef.current;
+    if (!d) return;
+    audioDragRef.current = null;
+    if (!d.didMove) return;
+    setPast((p) => [...p, d.prevState].slice(-80));
+    setFuture([]);
+    setExportUrl(null);
+    setExportError(null);
+  }
+
   function beginTrimDrag(clipId: string, handle: "in" | "out", startX: number) {
     const el = stripRef.current;
     const clip = timeline.clips.find((c) => c.id === clipId);
@@ -992,6 +1079,17 @@ export default function StudioPage() {
   useEffect(() => {
     const onMove = (e: PointerEvent) => onTrimMove(e.clientX);
     const onUp = () => endTrimDrag();
+    window.addEventListener("pointermove", onMove);
+    window.addEventListener("pointerup", onUp);
+    return () => {
+      window.removeEventListener("pointermove", onMove);
+      window.removeEventListener("pointerup", onUp);
+    };
+  }, [timeline, duration]);
+
+  useEffect(() => {
+    const onMove = (e: PointerEvent) => onAudioTrimMove(e.clientX);
+    const onUp = () => endAudioTrimDrag();
     window.addEventListener("pointermove", onMove);
     window.addEventListener("pointerup", onUp);
     return () => {
@@ -1406,6 +1504,7 @@ export default function StudioPage() {
               }}
               onScrub={(t, play) => scrubToProjectTime(t, play)}
               onBeginDrag={(clipId, handle, startX) => beginTrimDrag(clipId, handle, startX)}
+              onBeginAudioDrag={(clipId, handle, startX) => beginAudioTrimDrag(clipId, handle, startX)}
               onDropVideoPayload={async (payload, t) => {
                 if (payload.kind === "asset") await insertAssetAtTime(payload.assetId, t);
                 if (payload.kind === "clip") await reorderClipToTime(payload.clipId, t);
@@ -1462,6 +1561,7 @@ function TimelineStrip({
   onToggleTrackMute,
   onScrub,
   onBeginDrag,
+  onBeginAudioDrag,
   onDropVideoPayload,
   onDropAudioPayload,
   getGhostLenSeconds,
@@ -1488,6 +1588,7 @@ function TimelineStrip({
   onToggleTrackMute: () => void;
   onScrub: (t: number, play: boolean) => void;
   onBeginDrag: (clipId: string, handle: "in" | "out", startX: number) => void;
+  onBeginAudioDrag: (clipId: string, handle: "in" | "out", startX: number) => void;
   onDropVideoPayload: (payload: DragPayload, projectTime: number) => void;
   onDropAudioPayload: (payload: DragPayload, projectTime: number) => void;
   getGhostLenSeconds: (payload: DragPayload) => number | null;
@@ -1826,7 +1927,35 @@ function TimelineStrip({
                       e.stopPropagation();
                       onSelectAudio(c.id);
                     }}
-                  />
+                  >
+                    {editable ? (
+                      <>
+                        <div
+                          className="tlHandle left audioHandle"
+                          onPointerDown={(e) => {
+                            e.stopPropagation();
+                            e.preventDefault(); // prevent native drag start
+                            onSelectAudio(c.id);
+                            onBeginAudioDrag(c.id, "in", e.clientX);
+                          }}
+                          aria-label="Trim audio in"
+                          draggable={false}
+                        />
+                        <div className="tlLabel audioLabel">{c.label}</div>
+                        <div
+                          className="tlHandle right audioHandle"
+                          onPointerDown={(e) => {
+                            e.stopPropagation();
+                            e.preventDefault(); // prevent native drag start
+                            onSelectAudio(c.id);
+                            onBeginAudioDrag(c.id, "out", e.clientX);
+                          }}
+                          aria-label="Trim audio out"
+                          draggable={false}
+                        />
+                      </>
+                    ) : null}
+                  </div>
                 );
               })}
 
