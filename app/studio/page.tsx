@@ -1815,6 +1815,9 @@ export default function StudioPage() {
                 <button className="chip" onClick={() => sendToAssistant("Focus on action scenes")}>Focus on action scenes</button>
                 <button className="chip" onClick={() => sendToAssistant("Make it shorter")}>Make it shorter</button>
                 <button className="chip" onClick={() => sendToAssistant("Auto-edit a 60s fast highlight reel")}>Auto Edit (60s)</button>
+                <button className="chip" onClick={() => sendToAssistant("Make it cinematic and around 90 seconds")}>Cinematic (90s)</button>
+                <button className="chip" onClick={() => sendToAssistant("Unlink audio")}>Unlink audio</button>
+                <button className="chip" onClick={() => sendToAssistant("Link audio")}>Link audio</button>
               </div>
 
               <form
