@@ -42,7 +42,9 @@ type DragPayload =
 const DRAG_MIME = "application/x-clipgenius-studio";
 
 export default function StudioPage() {
+  const AUTOSAVE_KEY = "clipgenius-studio:autosave:v1";
   const fileInputRef = useRef<HTMLInputElement | null>(null);
+  const projectFileInputRef = useRef<HTMLInputElement | null>(null);
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const bgVideoRef = useRef<HTMLVideoElement | null>(null);
   const stripRef = useRef<HTMLDivElement | null>(null);
@@ -111,6 +113,88 @@ export default function StudioPage() {
   const [chat, setChat] = useState<Array<{ role: "ai" | "user"; text: string }>>([
     { role: "ai", text: "Upload clips and I’ll draft a highlight timeline. Then tell me how to improve it." }
   ]);
+
+  // ---- Autosave / restore (localStorage) ----
+  useEffect(() => {
+    try {
+      const raw = window.localStorage.getItem(AUTOSAVE_KEY);
+      if (!raw) return;
+      const parsed = JSON.parse(raw) as any;
+      if (!parsed || parsed.v !== 1) return;
+      if (!Array.isArray(parsed.assets) || !parsed.timeline) return;
+      setAssets(parsed.assets as Asset[]);
+      setTimeline(parsed.timeline as ProjectTimeline);
+      setSelectedClipId(parsed.selectedClipId ?? null);
+      setSelectedAudioClipId(parsed.selectedAudioClipId ?? null);
+      if (Array.isArray(parsed.chat) && parsed.chat.length) setChat(parsed.chat);
+      // New session: clear undo/redo stacks.
+      setPast([]);
+      setFuture([]);
+    } catch {
+      // ignore
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  useEffect(() => {
+    const handle = window.setTimeout(() => {
+      try {
+        const payload = {
+          v: 1,
+          savedAt: Date.now(),
+          assets,
+          timeline,
+          selectedClipId,
+          selectedAudioClipId,
+          chat
+        };
+        window.localStorage.setItem(AUTOSAVE_KEY, JSON.stringify(payload));
+      } catch {
+        // ignore
+      }
+    }, 500);
+    return () => window.clearTimeout(handle);
+  }, [AUTOSAVE_KEY, assets, timeline, selectedClipId, selectedAudioClipId, chat]);
+
+  function downloadProjectJson() {
+    try {
+      const payload = {
+        v: 1,
+        savedAt: Date.now(),
+        assets,
+        timeline,
+        chat
+      };
+      const blob = new Blob([JSON.stringify(payload, null, 2)], { type: "application/json" });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = `clipgenius-project-${new Date().toISOString().slice(0, 19).replaceAll(":", "-")}.json`;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      URL.revokeObjectURL(url);
+    } catch {
+      // ignore
+    }
+  }
+
+  async function loadProjectFromFile(file: File) {
+    try {
+      const text = await file.text();
+      const parsed = JSON.parse(text) as any;
+      if (!parsed || parsed.v !== 1 || !Array.isArray(parsed.assets) || !parsed.timeline) return;
+      setAssets(parsed.assets as Asset[]);
+      setTimeline(parsed.timeline as ProjectTimeline);
+      if (Array.isArray(parsed.chat) && parsed.chat.length) setChat(parsed.chat);
+      setSelectedClipId(null);
+      setSelectedAudioClipId(null);
+      setPast([]);
+      setFuture([]);
+    } catch {
+      // ignore
+    }
+  }
 
   // ---- Preview playback across multiple assets ----
   const previewRef = useRef<{
@@ -1600,6 +1684,12 @@ export default function StudioPage() {
           <button className="btn ghost" onClick={redo} disabled={future.length === 0} aria-label="Redo">
             Redo
           </button>
+          <button className="btn ghost" onClick={downloadProjectJson} disabled={assets.length === 0 && timeline.clips.length === 0}>
+            Save
+          </button>
+          <button className="btn ghost" onClick={() => projectFileInputRef.current?.click()}>
+            Load
+          </button>
           <button className="btn ghost" onClick={() => fileInputRef.current?.click()} disabled={isUploading}>
             {isUploading ? "Importing…" : "Import"}
           </button>
@@ -1610,6 +1700,17 @@ export default function StudioPage() {
             accept="video/*"
             multiple
             onChange={(e) => onPickFiles(e.target.files)}
+          />
+          <input
+            ref={projectFileInputRef}
+            className="fileInput"
+            type="file"
+            accept="application/json"
+            onChange={(e) => {
+              const f = e.target.files?.[0];
+              if (f) loadProjectFromFile(f);
+              if (projectFileInputRef.current) projectFileInputRef.current.value = "";
+            }}
           />
         </div>
       </header>
