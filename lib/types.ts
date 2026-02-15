@@ -47,6 +47,7 @@ export type ProjectTimeline = {
   audioLinked?: boolean;
   audioClips?: AudioClip[];
   trackAudioMuted?: boolean;
+  trackAudioVolume?: number; // 0..2
   trackVideoHidden?: boolean;
 };
 

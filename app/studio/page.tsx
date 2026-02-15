@@ -85,6 +85,7 @@ export default function StudioPage() {
     clips: [],
     audioLinked: true,
     trackAudioMuted: false,
+    trackAudioVolume: 1,
     trackVideoHidden: false
   });
   const [selectedClipId, setSelectedClipId] = useState<string | null>(null);
@@ -165,6 +166,8 @@ export default function StudioPage() {
     if (t.clips.length === 0) return t;
     const minLen = 0.2;
     let changed = false;
+    const trackAudioVolumeRaw = t.trackAudioVolume ?? 1;
+    const trackAudioVolume = clamp(Number.isFinite(trackAudioVolumeRaw) ? trackAudioVolumeRaw : 1, 0, 2);
     const clips = t.clips.map((c) => {
       const asset = assetsById.get(c.assetId);
       const maxOut = asset?.durationSeconds || 0;
@@ -207,7 +210,8 @@ export default function StudioPage() {
       });
     }
 
-    return changed ? { ...t, clips, audioClips } : t;
+    if (trackAudioVolume !== (t.trackAudioVolume ?? 1)) changed = true;
+    return changed ? { ...t, clips, audioClips, trackAudioVolume } : t;
   }
 
   function makeClipFromAsset(a: Asset): ProjectClip | null {
@@ -518,6 +522,7 @@ export default function StudioPage() {
     }
 
     const active = new Set<string>();
+    const trackVol = clamp(Number.isFinite(timeline.trackAudioVolume as any) ? (timeline.trackAudioVolume as any) : 1, 0, 2);
     for (const c of timeline.audioClips) {
       if (!c || !c.id || typeof c.id !== "string") continue;
       if (c.muted) continue;
@@ -534,7 +539,7 @@ export default function StudioPage() {
       const el = getOrCreateUnlinkedAudioEl(c.id, asset.videoUrl);
       el.muted = false;
       const vol = clamp(Number.isFinite(c.volume as any) ? (c.volume as any) : 1, 0, 2);
-      el.volume = clamp(vol / 2, 0, 1);
+      el.volume = clamp((vol * trackVol) / 2, 0, 1);
       // Keep audio in sync with the timeline playhead.
       if (Number.isFinite(el.currentTime) && Math.abs(el.currentTime - desired) > 0.25) {
         try {
@@ -569,8 +574,9 @@ export default function StudioPage() {
     }
     const muted = Boolean(clip?.audioMuted);
     const vol = clamp(Number.isFinite(clip?.audioVolume as any) ? (clip?.audioVolume as any) : 1, 0, 2);
+    const trackVol = clamp(Number.isFinite(timeline.trackAudioVolume as any) ? (timeline.trackAudioVolume as any) : 1, 0, 2);
     fg.muted = muted;
-    fg.volume = clamp(vol / 2, 0, 1);
+    fg.volume = clamp((vol * trackVol) / 2, 0, 1);
   }
 
   async function ensurePlayerOnAsset(asset: Asset, seekTo: number, play: boolean) {
@@ -1566,6 +1572,9 @@ export default function StudioPage() {
                   selectedAudioClipId
                 });
               }}
+              onPatchTrackAudioVolumeLive={(volume) => {
+                setTimeline((t) => sanitizeTimelineIfNeeded({ ...t, trackAudioVolume: volume }));
+              }}
               onToggleAudioMute={(id) => {
                 if (String(id).startsWith("linked-")) {
                   const clipId = String(id).slice("linked-".length);
@@ -1653,6 +1662,7 @@ function TimelineStrip({
   onSelectAudio,
   onToggleAudioLink,
   onToggleTrackMute,
+  onPatchTrackAudioVolumeLive,
   onToggleAudioMute,
   getHistoryState,
   onCommitHistory,
@@ -1684,6 +1694,7 @@ function TimelineStrip({
   onSelectAudio: (id: string) => void;
   onToggleAudioLink: () => void;
   onToggleTrackMute: () => void;
+  onPatchTrackAudioVolumeLive: (volume: number) => void;
   onToggleAudioMute: (id: string) => void;
   getHistoryState: () => HistoryState;
   onCommitHistory: (prev: HistoryState) => void;
@@ -1711,6 +1722,7 @@ function TimelineStrip({
   const laneVideoRef = useRef<HTMLDivElement | null>(null);
   const laneAudioRef = useRef<HTMLDivElement | null>(null);
   const audioVolDragRef = useRef<null | { clipId: string; pointerId: number; prev: HistoryState }>(null);
+  const trackVolDragRef = useRef<null | { pointerId: number; prev: HistoryState }>(null);
 
   function clientXToProjectTime(clientX: number) {
     const el = refEl.current;
@@ -1837,6 +1849,62 @@ function TimelineStrip({
           </div>
           <div className="trackRailRow">
             <div className="trackLabel" aria-hidden="true">A1</div>
+            <div
+              className="trackVolControl"
+              role="slider"
+              tabIndex={0}
+              aria-label="Track volume"
+              aria-valuemin={0}
+              aria-valuemax={200}
+              aria-valuenow={Math.round(clamp((timeline.trackAudioVolume ?? 1) * 100, 0, 200))}
+              aria-valuetext={`${Math.round(clamp((timeline.trackAudioVolume ?? 1) * 100, 0, 200))}% track volume`}
+              style={{ ["--volY" as any]: `${volumeToYPercent(timeline.trackAudioVolume).toFixed(2)}%` } as any}
+              onPointerDown={(e) => {
+                e.preventDefault();
+                e.stopPropagation();
+                const rect = (e.currentTarget as HTMLElement).getBoundingClientRect();
+                const prev = getHistoryState();
+                trackVolDragRef.current = { pointerId: e.pointerId, prev };
+                (e.currentTarget as HTMLElement).setPointerCapture?.(e.pointerId);
+                onPatchTrackAudioVolumeLive(yClientToVolume(e.clientY, rect));
+              }}
+              onPointerMove={(e) => {
+                const d = trackVolDragRef.current;
+                if (!d || d.pointerId !== e.pointerId) return;
+                const rect = (e.currentTarget as HTMLElement).getBoundingClientRect();
+                onPatchTrackAudioVolumeLive(yClientToVolume(e.clientY, rect));
+              }}
+              onPointerUp={(e) => {
+                const d = trackVolDragRef.current;
+                if (!d || d.pointerId !== e.pointerId) return;
+                trackVolDragRef.current = null;
+                try {
+                  (e.currentTarget as HTMLElement).releasePointerCapture?.(e.pointerId);
+                } catch {}
+                onCommitHistory(d.prev);
+              }}
+              onPointerCancel={(e) => {
+                const d = trackVolDragRef.current;
+                if (!d || d.pointerId !== e.pointerId) return;
+                trackVolDragRef.current = null;
+                try {
+                  (e.currentTarget as HTMLElement).releasePointerCapture?.(e.pointerId);
+                } catch {}
+                onCommitHistory(d.prev);
+              }}
+              onKeyDown={(e) => {
+                if (e.key !== "ArrowUp" && e.key !== "ArrowDown") return;
+                e.preventDefault();
+                const dir = e.key === "ArrowUp" ? 1 : -1;
+                const cur = clamp(Number.isFinite(timeline.trackAudioVolume as any) ? (timeline.trackAudioVolume as any) : 1, 0, 2);
+                const next = clamp(cur + dir * 0.05, 0, 2);
+                const prev = getHistoryState();
+                onPatchTrackAudioVolumeLive(next);
+                onCommitHistory(prev);
+              }}
+            >
+              <div className="trackVolLine" aria-hidden="true" />
+            </div>
             <button
               type="button"
               className={`trackBtn ${timeline.trackAudioMuted ? "on" : ""}`}

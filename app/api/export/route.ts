@@ -88,19 +88,21 @@ export async function POST(req: Request) {
   const projectDuration = Math.max(0.001, projectDurationSeconds(timeline));
 
   const unlinkedAudio = timeline.audioLinked === false && Array.isArray(timeline.audioClips);
-  const exportMuted = Boolean(timeline.trackAudioMuted);
+  const trackVol = clamp(Number.isFinite(timeline.trackAudioVolume as any) ? (timeline.trackAudioVolume as any) : 1, 0, 2);
+  const exportMuted = Boolean(timeline.trackAudioMuted) || trackVol <= 0.0001;
 
   const linkedNeedsMix =
     !unlinkedAudio &&
     !exportMuted &&
     Array.isArray(timeline.clips) &&
-    timeline.clips.some((c) => Boolean(c.audioMuted) || Math.abs((c.audioVolume ?? 1) - 1) > 0.001);
+    (Math.abs(trackVol - 1) > 0.001 ||
+      timeline.clips.some((c) => Boolean(c.audioMuted) || Math.abs((c.audioVolume ?? 1) - 1) > 0.001));
 
   const audioPlan =
     !exportMuted && unlinkedAudio
-      ? await buildUnlinkedAudioPlan(timeline.audioClips ?? [], assetMap, projectDuration)
+      ? await buildUnlinkedAudioPlan(timeline.audioClips ?? [], assetMap, projectDuration, trackVol)
       : !exportMuted && linkedNeedsMix
-        ? await buildLinkedAudioPlan(timeline.clips ?? [], assetMap, projectDuration)
+        ? await buildLinkedAudioPlan(timeline.clips ?? [], assetMap, projectDuration, trackVol)
         : null;
 
   // Re-encode for reliable cuts across keyframes + consistent output.
@@ -149,7 +151,7 @@ export async function POST(req: Request) {
   });
 }
 
-async function buildLinkedAudioPlan(videoClips: ProjectTimeline["clips"], assetMap: Map<string, string>, projectDuration: number) {
+async function buildLinkedAudioPlan(videoClips: ProjectTimeline["clips"], assetMap: Map<string, string>, projectDuration: number, trackVol: number) {
   // Build a derived audio lane from the video timeline so we can apply per-clip volume/mute.
   const derived: AudioClip[] = [];
   let acc = 0;
@@ -168,14 +170,14 @@ async function buildLinkedAudioPlan(videoClips: ProjectTimeline["clips"], assetM
       sourceIn: inpoint,
       sourceOut: outpoint,
       start,
-      volume: clamp(Number.isFinite(c.audioVolume as any) ? (c.audioVolume as any) : 1, 0, 2),
+      volume: clamp(Number.isFinite(c.audioVolume as any) ? (c.audioVolume as any) : 1, 0, 2) * trackVol,
       muted: Boolean(c.audioMuted)
     });
   }
-  return buildUnlinkedAudioPlan(derived, assetMap, projectDuration);
+  return buildUnlinkedAudioPlan(derived, assetMap, projectDuration, 1);
 }
 
-async function buildUnlinkedAudioPlan(audioClips: AudioClip[], assetMap: Map<string, string>, projectDuration: number) {
+async function buildUnlinkedAudioPlan(audioClips: AudioClip[], assetMap: Map<string, string>, projectDuration: number, trackVol: number) {
   // De-dupe inputs by source file path to avoid opening the same file repeatedly.
   // We'll reference them by input index in filter_complex.
   const inputs: string[] = [];
@@ -203,7 +205,7 @@ async function buildUnlinkedAudioPlan(audioClips: AudioClip[], assetMap: Map<str
     if (outpoint <= inpoint + 0.05) continue;
 
     const volumeRaw = (c.volume ?? 1) as any;
-    const volume = clamp(Number.isFinite(volumeRaw) ? volumeRaw : 1, 0, 2);
+    const volume = clamp(Number.isFinite(volumeRaw) ? volumeRaw : 1, 0, 2) * trackVol;
     if (volume <= 0) continue;
 
     const hasAudio = await probeHasAudio(src);
