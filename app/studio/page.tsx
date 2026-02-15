@@ -2,7 +2,7 @@
 
 import { useEffect, useMemo, useRef, useState } from "react";
 import type { MutableRefObject } from "react";
-import type { AssistantReply, AnalysisTimeline, AudioClip, ProjectClip, ProjectTimeline } from "../../lib/types";
+import type { AssistantReply, AnalysisClip, AnalysisTimeline, AudioClip, ProjectClip, ProjectTimeline } from "../../lib/types";
 import { projectClipOffsets, projectDurationSeconds, splitProjectClipAt, trimProjectTimelineToTargetSeconds } from "../../lib/timeline";
 
 type ExportSettings = {
@@ -219,9 +219,22 @@ export default function StudioPage() {
         const volumeRaw = c.volume ?? 1;
         const volume = clamp(Number.isFinite(volumeRaw) ? volumeRaw : 1, 0, 2);
         const muted = Boolean(c.muted);
-        if (sourceIn === c.sourceIn && sourceOut === c.sourceOut && start === c.start && volume === (c.volume ?? 1) && muted === Boolean(c.muted)) return c;
+        const fadeInRaw = c.fadeIn ?? 0;
+        const fadeOutRaw = c.fadeOut ?? 0;
+        const fadeIn = clamp(Number.isFinite(fadeInRaw) ? fadeInRaw : 0, 0, Math.max(0, len / 2));
+        const fadeOut = clamp(Number.isFinite(fadeOutRaw) ? fadeOutRaw : 0, 0, Math.max(0, len / 2));
+        if (
+          sourceIn === c.sourceIn &&
+          sourceOut === c.sourceOut &&
+          start === c.start &&
+          volume === (c.volume ?? 1) &&
+          muted === Boolean(c.muted) &&
+          fadeIn === (c.fadeIn ?? 0) &&
+          fadeOut === (c.fadeOut ?? 0)
+        )
+          return c;
         changed = true;
-        return { ...c, sourceIn, sourceOut, start, volume, muted };
+        return { ...c, sourceIn, sourceOut, start, volume, muted, fadeIn, fadeOut };
       });
     }
 
@@ -834,6 +847,129 @@ export default function StudioPage() {
   }
 
   // ---- AI ----
+  function autoEditDraft(
+    targetSeconds: number,
+    style?: "fast" | "cinematic" | "story",
+    opts?: { highlightsOnly?: boolean }
+  ) {
+    const secs = clamp(Number(targetSeconds) || 60, 10, 20 * 60);
+    if (assets.length === 0) return timeline;
+    const highlightsOnly = Boolean(opts?.highlightsOnly);
+
+    // Collect candidate segments from analysis timelines.
+    type Cand = { assetId: string; label: string; start: number; end: number; score: number };
+    const cands: Cand[] = [];
+
+    for (const a of assets) {
+      const ana = a.analysis;
+      if (!ana?.clips?.length) continue;
+      for (const c of ana.clips) {
+        if (highlightsOnly && c.kind !== "highlight") continue;
+        const len = Math.max(0, c.end - c.start);
+        if (len < 0.8) continue;
+        const mid = (c.start + c.end) / 2;
+        const pos = ana.durationSeconds > 0 ? mid / ana.durationSeconds : 0.5;
+        // Score: prefer highlights (if available), avoid intro/outro in fast mode, prefer mid.
+        const kindBoost = c.kind === "highlight" ? 2.2 : c.kind === "broll" ? 1.3 : 1.0;
+        const centerBoost = 1.0 + (1 - Math.abs(pos - 0.5)) * 0.9;
+        const labelBoost = /action|climax|highlight/i.test(c.label) ? 1.35 : /intro|outro/i.test(c.label) ? 0.9 : 1.0;
+        const lenTarget = style === "cinematic" ? 4.5 : style === "story" ? 3.5 : 2.2;
+        const lenBoost = 1.0 - Math.min(0.6, Math.abs(len - lenTarget) / Math.max(1, lenTarget));
+        const edgePenalty = style === "fast" ? 1.0 - Math.max(0, Math.abs(pos - 0.5) - 0.35) * 1.4 : 1.0;
+        const score = kindBoost * centerBoost * labelBoost * (0.7 + lenBoost) * edgePenalty;
+        cands.push({ assetId: a.assetId, label: c.label, start: c.start, end: c.end, score });
+      }
+    }
+
+    // Fallback: if analysis is missing, use full assets.
+    if (cands.length === 0) {
+      const clips = assets
+        .filter((a) => a.durationSeconds > 0)
+        .map((a) => ({
+          id: crypto.randomUUID(),
+          assetId: a.assetId,
+          label: cleanName(a.name),
+          sourceIn: 0,
+          sourceOut: Math.min(a.durationSeconds, secs)
+        }));
+      return sanitizeTimelineIfNeeded({
+        ...timeline,
+        clips,
+        audioLinked: true,
+        audioClips: undefined
+      });
+    }
+
+    // Pick segments until we hit targetSeconds, with style-dependent trimming.
+    cands.sort((a, b) => b.score - a.score);
+
+    const picked: ProjectClip[] = [];
+    let total = 0;
+    const maxClipLen = style === "cinematic" ? 6 : style === "story" ? 4.5 : 3.0;
+    const minClipLen = style === "cinematic" ? 2 : style === "story" ? 1.5 : 1.0;
+
+    for (const c of cands) {
+      if (total >= secs) break;
+      const asset = assetsById.get(c.assetId);
+      if (!asset) continue;
+      const rawLen = Math.max(0, c.end - c.start);
+      const want = clamp(rawLen, minClipLen, maxClipLen);
+      const start = clamp(c.start, 0, Math.max(0, asset.durationSeconds - want));
+      const end = clamp(start + want, start + minClipLen, asset.durationSeconds);
+      const len = end - start;
+      if (len < minClipLen) continue;
+      picked.push({
+        id: crypto.randomUUID(),
+        assetId: c.assetId,
+        label: c.label,
+        sourceIn: start,
+        sourceOut: end,
+        audioVolume: 1,
+        audioMuted: false,
+        audioFadeIn: 0.12,
+        audioFadeOut: 0.12
+      });
+      total += len;
+    }
+
+    // Ensure a clean story: if "story" style and we have enough, prepend intro + append outro if available.
+    if (style === "story") {
+      const intro = findNamedSegment("intro");
+      const outro = findNamedSegment("outro");
+      if (intro) picked.unshift(intro);
+      if (outro) picked.push(outro);
+    }
+
+    // Trim final timeline to target seconds, keeping sequence order.
+    let nextTimeline: ProjectTimeline = { ...timeline, clips: picked };
+    nextTimeline = trimProjectTimelineToTargetSeconds(nextTimeline, secs);
+    nextTimeline = { ...nextTimeline, audioLinked: true, audioClips: undefined };
+    return sanitizeTimelineIfNeeded(nextTimeline);
+
+    function findNamedSegment(name: "intro" | "outro") {
+      for (const a of assets) {
+        const ana = a.analysis;
+        const seg = ana?.clips?.find((c) => c.label.toLowerCase() === name);
+        if (!seg) continue;
+        const want = name === "intro" ? 2.5 : 2.0;
+        const start = clamp(seg.start, 0, Math.max(0, a.durationSeconds - want));
+        const end = clamp(start + want, start + 1, a.durationSeconds);
+        return {
+          id: crypto.randomUUID(),
+          assetId: a.assetId,
+          label: name === "intro" ? "Intro" : "Outro",
+          sourceIn: start,
+          sourceOut: end,
+          audioVolume: 1,
+          audioMuted: false,
+          audioFadeIn: 0.12,
+          audioFadeOut: 0.2
+        } as ProjectClip;
+      }
+      return null;
+    }
+  }
+
   async function sendToAssistant(text: string) {
     const userText = text.trim();
     if (!userText) return;
@@ -859,10 +995,110 @@ export default function StudioPage() {
       for (const op of data.operations) {
         if (op.op === "trim_to_target_seconds") {
           t = trimProjectTimelineToTargetSeconds(t, op.targetSeconds);
+        } else if (op.op === "auto_edit") {
+          t = autoEditDraft(op.targetSeconds, op.style, { highlightsOnly: op.highlightsOnly });
+        } else if (op.op === "set_clip_length_profile") {
+          t = setClipLengthProfile(t, op.minSeconds, op.maxSeconds, op.avgSeconds);
+        } else if (op.op === "set_audio_fades") {
+          t = setAudioFades(t, op.fadeInSeconds, op.fadeOutSeconds);
+        } else if (op.op === "set_audio_linked") {
+          t = setAudioLinked(t, op.linked);
+        } else if (op.op === "set_track_audio") {
+          t = setTrackAudio(t, op.volume, op.muted);
         }
       }
       applyWithHistory({ timeline: t, selectedClipId: t.clips[0]?.id ?? null });
     }
+  }
+
+  function setClipLengthProfile(
+    t: ProjectTimeline,
+    minSecondsRaw: number,
+    maxSecondsRaw: number,
+    avgSecondsRaw?: number
+  ): ProjectTimeline {
+    if (t.clips.length === 0) return t;
+    const minSeconds = clamp(Number(minSecondsRaw) || 0.8, 0.2, 20);
+    const maxSeconds = clamp(Number(maxSecondsRaw) || 3.0, minSeconds, 30);
+    const avgSeconds = avgSecondsRaw == null ? (minSeconds + maxSeconds) / 2 : clamp(Number(avgSecondsRaw) || (minSeconds + maxSeconds) / 2, minSeconds, maxSeconds);
+
+    const clips = t.clips.map((c) => {
+      const asset = assetsById.get(c.assetId);
+      const maxOut = asset?.durationSeconds ?? c.sourceOut;
+      const curLen = Math.max(0.2, c.sourceOut - c.sourceIn);
+      const mid = c.sourceIn + curLen / 2;
+      // Small deterministic "variation" per clip, without randomness (stable across renders).
+      const hash = simpleHash(c.id);
+      const jitter = ((hash % 1000) / 999 - 0.5) * 0.6; // -0.3..+0.3
+      const want = clamp(avgSeconds * (1 + jitter), minSeconds, maxSeconds);
+      let start = mid - want / 2;
+      let end = mid + want / 2;
+      if (start < 0) {
+        end -= start;
+        start = 0;
+      }
+      if (end > maxOut) {
+        const over = end - maxOut;
+        start = Math.max(0, start - over);
+        end = maxOut;
+      }
+      if (end - start < 0.2) {
+        start = clamp(start, 0, Math.max(0, maxOut - 0.2));
+        end = Math.min(maxOut, start + 0.2);
+      }
+      return { ...c, sourceIn: start, sourceOut: end };
+    });
+
+    return sanitizeTimelineIfNeeded({ ...t, clips });
+  }
+
+  function setAudioFades(t: ProjectTimeline, fadeInSecondsRaw: number, fadeOutSecondsRaw: number): ProjectTimeline {
+    const fadeInSeconds = clamp(Number(fadeInSecondsRaw) || 0, 0, 2);
+    const fadeOutSeconds = clamp(Number(fadeOutSecondsRaw) || 0, 0, 2);
+    const clips = t.clips.map((c) => ({ ...c, audioFadeIn: fadeInSeconds, audioFadeOut: fadeOutSeconds }));
+    let audioClips = t.audioClips;
+    if (t.audioLinked === false && Array.isArray(t.audioClips)) {
+      audioClips = t.audioClips.map((c) => ({ ...c, fadeIn: fadeInSeconds, fadeOut: fadeOutSeconds }));
+    }
+    return sanitizeTimelineIfNeeded({ ...t, clips, audioClips });
+  }
+
+  function setTrackAudio(t: ProjectTimeline, volumeRaw?: number, muted?: boolean): ProjectTimeline {
+    const next: ProjectTimeline = { ...t };
+    if (volumeRaw != null) next.trackAudioVolume = clamp(Number(volumeRaw) || 1, 0, 2);
+    if (muted != null) next.trackAudioMuted = Boolean(muted);
+    return sanitizeTimelineIfNeeded(next);
+  }
+
+  function setAudioLinked(t: ProjectTimeline, linked: boolean): ProjectTimeline {
+    if (linked) return sanitizeTimelineIfNeeded({ ...t, audioLinked: true, audioClips: undefined });
+    // Unlink: materialize audio clips from current video clips that actually have audio.
+    const offsetsLocal = projectClipOffsets(t);
+    const nextAudio: AudioClip[] = [];
+    for (const c of t.clips) {
+      const a = assetsById.get(c.assetId);
+      if (!a?.hasAudio) continue;
+      const start = offsetsLocal.get(c.id) ?? 0;
+      nextAudio.push({
+        id: crypto.randomUUID(),
+        assetId: c.assetId,
+        label: c.label,
+        sourceIn: c.sourceIn,
+        sourceOut: c.sourceOut,
+        start,
+        volume: c.audioVolume ?? 1,
+        muted: Boolean(c.audioMuted),
+        fadeIn: c.audioFadeIn ?? 0,
+        fadeOut: c.audioFadeOut ?? 0
+      });
+    }
+    return sanitizeTimelineIfNeeded({ ...t, audioLinked: false, audioClips: nextAudio.sort((x, y) => x.start - y.start) });
+  }
+
+  function simpleHash(s: string) {
+    let h = 2166136261;
+    for (let i = 0; i < s.length; i++) h = Math.imul(h ^ s.charCodeAt(i), 16777619);
+    return (h >>> 0) as number;
   }
 
   function toggleAudioLink() {
@@ -1578,6 +1814,7 @@ export default function StudioPage() {
                 <button className="chip" onClick={() => sendToAssistant("Add smoother transitions")}>Add smoother transitions</button>
                 <button className="chip" onClick={() => sendToAssistant("Focus on action scenes")}>Focus on action scenes</button>
                 <button className="chip" onClick={() => sendToAssistant("Make it shorter")}>Make it shorter</button>
+                <button className="chip" onClick={() => sendToAssistant("Auto-edit a 60s fast highlight reel")}>Auto Edit (60s)</button>
               </div>
 
               <form

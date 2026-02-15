@@ -59,6 +59,38 @@ export type AssistantOperation =
   | {
       op: "trim_to_target_seconds";
       targetSeconds: number;
+    }
+  | {
+      op: "auto_edit";
+      targetSeconds: number;
+      style?: "fast" | "cinematic" | "story";
+      // Prefer analysis clips marked as highlights (if available).
+      highlightsOnly?: boolean;
+    }
+  | {
+      // Adjust pacing without fully rebuilding the draft.
+      // Keeps clip order, re-times each clip around its current midpoint.
+      op: "set_clip_length_profile";
+      minSeconds: number;
+      maxSeconds: number;
+      avgSeconds?: number;
+    }
+  | {
+      // Apply audio fades broadly (works for linked and unlinked audio).
+      op: "set_audio_fades";
+      fadeInSeconds: number;
+      fadeOutSeconds: number;
+    }
+  | {
+      // Switch between linked (audio embedded in video clips) and unlinked (separate audio lane).
+      op: "set_audio_linked";
+      linked: boolean;
+    }
+  | {
+      // Track-level audio controls (A1).
+      op: "set_track_audio";
+      volume?: number; // 0..2
+      muted?: boolean;
     };
 
 export type AssistantReply = {
