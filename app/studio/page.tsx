@@ -157,6 +157,12 @@ export default function StudioPage() {
     return audioClips.find((c) => c.id === selectedAudioClipId) ?? null;
   }, [audioClips, selectedAudioClipId]);
 
+  const selectedUnlinkedAudioClip = useMemo(() => {
+    if (timeline.audioLinked !== false) return null;
+    if (!selectedAudioClipId || String(selectedAudioClipId).startsWith("linked-")) return null;
+    return (timeline.audioClips || []).find((c) => c.id === selectedAudioClipId) ?? null;
+  }, [timeline.audioLinked, timeline.audioClips, selectedAudioClipId]);
+
   const selectedAsset = useMemo(() => {
     if (!selectedClip) return null;
     return assetsById.get(selectedClip.assetId) ?? null;
@@ -461,6 +467,30 @@ export default function StudioPage() {
 
   useEffect(() => {
     const onKeyDown = (e: KeyboardEvent) => {
+      const el = document.activeElement as HTMLElement | null;
+      const tag = (el?.tagName || "").toLowerCase();
+      if (tag === "input" || tag === "textarea" || (el as any)?.isContentEditable) return;
+
+      if (e.key === "Backspace" || e.key === "Delete") {
+        e.preventDefault();
+        deleteSelection();
+      }
+      if (e.key.toLowerCase() === "s") {
+        // Split shortcut (simple MVP).
+        e.preventDefault();
+        splitSelectionAtPlayhead();
+      }
+      if (e.key === "Escape") {
+        setSelectedAudioClipId(null);
+        setSelectedClipId(null);
+      }
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [timeline, selectedClipId, selectedAudioClipId, playheadProjectTime]);
+
+  useEffect(() => {
+    const onKeyDown = (e: KeyboardEvent) => {
       if (e.key === "Alt") {
         altDownRef.current = true;
         setAltDown(true);
@@ -688,13 +718,68 @@ export default function StudioPage() {
   }
 
   // ---- Timeline editing ----
-  function deleteSelected() {
+  function deleteSelection() {
+    // Delete unlinked audio clip if selected.
+    if (timeline.audioLinked === false && selectedUnlinkedAudioClip && Array.isArray(timeline.audioClips)) {
+      const remaining = timeline.audioClips.filter((c) => c.id !== selectedUnlinkedAudioClip.id);
+      applyWithHistory({
+        timeline: { ...timeline, audioClips: remaining },
+        selectedClipId,
+        selectedAudioClipId: remaining[0]?.id ?? null
+      });
+      return;
+    }
+
+    // Otherwise delete video clip.
     if (!selectedClip) return;
     const remaining = timeline.clips.filter((c) => c.id !== selectedClip.id);
     applyWithHistory({ timeline: { ...timeline, clips: remaining }, selectedClipId: remaining[0]?.id ?? null });
   }
 
-  function splitSelectedAtPlayhead() {
+  function splitSelectionAtPlayhead() {
+    // Split unlinked audio clip at project playhead.
+    if (timeline.audioLinked === false && selectedUnlinkedAudioClip && Array.isArray(timeline.audioClips)) {
+      const clip = selectedUnlinkedAudioClip;
+      const len = Math.max(0.001, clip.sourceOut - clip.sourceIn);
+      const within = playheadProjectTime - clip.start;
+      if (!(within > 0.2 && within < len - 0.2)) return;
+      const splitSource = clamp(clip.sourceIn + within, clip.sourceIn + 0.2, clip.sourceOut - 0.2);
+      const leftLen = splitSource - clip.sourceIn;
+      const rightLen = clip.sourceOut - splitSource;
+      if (leftLen <= 0.2 || rightLen <= 0.2) return;
+
+      const left: AudioClip = {
+        ...clip,
+        id: crypto.randomUUID(),
+        sourceOut: splitSource,
+        // keep start
+        // avoid double-fade semantics for now
+        muted: clip.muted,
+        volume: clip.volume
+      };
+      const right: AudioClip = {
+        ...clip,
+        id: crypto.randomUUID(),
+        sourceIn: splitSource,
+        start: clip.start + within,
+        muted: clip.muted,
+        volume: clip.volume
+      };
+
+      const nextAudio = timeline.audioClips
+        .filter((c) => c.id !== clip.id)
+        .concat([left, right])
+        .sort((a, b) => a.start - b.start);
+
+      applyWithHistory({
+        timeline: { ...timeline, audioClips: nextAudio },
+        selectedClipId,
+        selectedAudioClipId: right.id
+      });
+      return;
+    }
+
+    // Otherwise split video clip at source playhead.
     const v = videoRef.current;
     if (!v || !selectedClip) return;
     const t = v.currentTime || 0;
@@ -1403,10 +1488,18 @@ export default function StudioPage() {
                 Stop
               </button>
 
-              <button className="tool" onClick={splitSelectedAtPlayhead} disabled={!selectedClip}>
+              <button
+                className="tool"
+                onClick={splitSelectionAtPlayhead}
+                disabled={!selectedClip && !(timeline.audioLinked === false && !!selectedUnlinkedAudioClip)}
+              >
                 Split
               </button>
-              <button className="tool" onClick={deleteSelected} disabled={!selectedClip}>
+              <button
+                className="tool"
+                onClick={deleteSelection}
+                disabled={!selectedClip && !(timeline.audioLinked === false && !!selectedUnlinkedAudioClip)}
+              >
                 Delete
               </button>
               <button className="tool" onClick={setInToPlayhead} disabled={!selectedClip}>
