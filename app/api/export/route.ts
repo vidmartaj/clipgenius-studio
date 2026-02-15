@@ -171,7 +171,9 @@ async function buildLinkedAudioPlan(videoClips: ProjectTimeline["clips"], assetM
       sourceOut: outpoint,
       start,
       volume: clamp(Number.isFinite(c.audioVolume as any) ? (c.audioVolume as any) : 1, 0, 2) * trackVol,
-      muted: Boolean(c.audioMuted)
+      muted: Boolean(c.audioMuted),
+      fadeIn: clamp(Number.isFinite(c.audioFadeIn as any) ? (c.audioFadeIn as any) : 0, 0, len / 2),
+      fadeOut: clamp(Number.isFinite(c.audioFadeOut as any) ? (c.audioFadeOut as any) : 0, 0, len / 2)
     });
   }
   return buildUnlinkedAudioPlan(derived, assetMap, projectDuration, 1);
@@ -189,6 +191,8 @@ async function buildUnlinkedAudioPlan(audioClips: AudioClip[], assetMap: Map<str
     sourceOut: number;
     start: number;
     volume: number;
+    fadeIn: number;
+    fadeOut: number;
   }> = [];
 
   for (const c of audioClips) {
@@ -208,6 +212,12 @@ async function buildUnlinkedAudioPlan(audioClips: AudioClip[], assetMap: Map<str
     const volume = clamp(Number.isFinite(volumeRaw) ? volumeRaw : 1, 0, 2) * trackVol;
     if (volume <= 0) continue;
 
+    const len = Math.max(0.05, outpoint - inpoint);
+    const fadeInRaw = (c.fadeIn ?? 0) as any;
+    const fadeOutRaw = (c.fadeOut ?? 0) as any;
+    const fadeIn = clamp(Number.isFinite(fadeInRaw) ? fadeInRaw : 0, 0, len / 2);
+    const fadeOut = clamp(Number.isFinite(fadeOutRaw) ? fadeOutRaw : 0, 0, len / 2);
+
     const hasAudio = await probeHasAudio(src);
     if (!hasAudio) continue;
 
@@ -218,7 +228,6 @@ async function buildUnlinkedAudioPlan(audioClips: AudioClip[], assetMap: Map<str
       inputIndexBySrc.set(src, inputIndex);
     }
 
-    const len = Math.max(0.05, outpoint - inpoint);
     const boundedStart = clamp(start, 0, Math.max(0, projectDuration - len));
 
     normalized.push({
@@ -226,7 +235,9 @@ async function buildUnlinkedAudioPlan(audioClips: AudioClip[], assetMap: Map<str
       sourceIn: Math.max(0, inpoint),
       sourceOut: Math.max(0, outpoint),
       start: boundedStart,
-      volume
+      volume,
+      fadeIn,
+      fadeOut
     });
   }
 
@@ -246,11 +257,19 @@ async function buildUnlinkedAudioPlan(audioClips: AudioClip[], assetMap: Map<str
     const delayMs = Math.max(0, Math.round(c.start * 1000));
     // adelay expects per-channel delays; provide the same delay for at least 2 channels.
     const delayArg = `${delayMs}|${delayMs}`;
+    const clipLen = Math.max(0.05, c.sourceOut - c.sourceIn);
+    const fadeBits: string[] = [];
+    if (c.fadeIn > 0.001) fadeBits.push(`afade=t=in:st=0:d=${c.fadeIn.toFixed(3)}`);
+    if (c.fadeOut > 0.001) {
+      const st = Math.max(0, clipLen - c.fadeOut);
+      fadeBits.push(`afade=t=out:st=${st.toFixed(3)}:d=${c.fadeOut.toFixed(3)}`);
+    }
     chains.push(
       `[${input}:a]` +
         `atrim=start=${c.sourceIn.toFixed(3)}:end=${c.sourceOut.toFixed(3)},` +
         `asetpts=PTS-STARTPTS,` +
         `volume=${c.volume.toFixed(3)},` +
+        (fadeBits.length ? `${fadeBits.join(",")},` : "") +
         `adelay=${delayArg}:all=1` +
         `[${label}]`
     );

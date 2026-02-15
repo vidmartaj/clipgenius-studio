@@ -143,7 +143,9 @@ export default function StudioPage() {
       sourceOut: c.sourceOut,
       start: offsets.get(c.id) ?? 0,
       volume: c.audioVolume ?? 1,
-      muted: Boolean(c.audioMuted)
+      muted: Boolean(c.audioMuted),
+      fadeIn: c.audioFadeIn ?? 0,
+      fadeOut: c.audioFadeOut ?? 0
     }));
   }, [timeline, offsets]);
 
@@ -184,15 +186,22 @@ export default function StudioPage() {
       const audioVolumeRaw = c.audioVolume ?? 1;
       const audioVolume = clamp(Number.isFinite(audioVolumeRaw) ? audioVolumeRaw : 1, 0, 2);
       const audioMuted = Boolean(c.audioMuted);
+      const len = Math.max(minLen, sourceOut - sourceIn);
+      const audioFadeInRaw = c.audioFadeIn ?? 0;
+      const audioFadeOutRaw = c.audioFadeOut ?? 0;
+      const audioFadeIn = clamp(Number.isFinite(audioFadeInRaw) ? audioFadeInRaw : 0, 0, Math.max(0, len / 2));
+      const audioFadeOut = clamp(Number.isFinite(audioFadeOutRaw) ? audioFadeOutRaw : 0, 0, Math.max(0, len / 2));
       if (
         sourceIn === c.sourceIn &&
         sourceOut === c.sourceOut &&
         audioVolume === (c.audioVolume ?? 1) &&
-        audioMuted === Boolean(c.audioMuted)
+        audioMuted === Boolean(c.audioMuted) &&
+        audioFadeIn === (c.audioFadeIn ?? 0) &&
+        audioFadeOut === (c.audioFadeOut ?? 0)
       )
         return c;
       changed = true;
-      return { ...c, sourceIn, sourceOut, audioVolume, audioMuted };
+      return { ...c, sourceIn, sourceOut, audioVolume, audioMuted, audioFadeIn, audioFadeOut };
     });
 
     const projectDuration = Math.max(0.001, projectDurationSeconds({ ...t, clips }));
@@ -229,7 +238,9 @@ export default function StudioPage() {
       sourceIn: 0,
       sourceOut: a.durationSeconds,
       audioVolume: 1,
-      audioMuted: false
+      audioMuted: false,
+      audioFadeIn: 0,
+      audioFadeOut: 0
     };
   }
 
@@ -244,7 +255,9 @@ export default function StudioPage() {
       sourceOut: a.durationSeconds,
       start: 0,
       volume: 1,
-      muted: false
+      muted: false,
+      fadeIn: 0,
+      fadeOut: 0
     };
   }
 
@@ -537,6 +550,17 @@ export default function StudioPage() {
     return el;
   }
 
+  function fadeGain(fadeIn: number, fadeOut: number, within: number, len: number) {
+    const L = Math.max(0.001, len);
+    const w = clamp(within, 0, L);
+    const fi = clamp(Number.isFinite(fadeIn as any) ? (fadeIn as any) : 0, 0, L / 2);
+    const fo = clamp(Number.isFinite(fadeOut as any) ? (fadeOut as any) : 0, 0, L / 2);
+    let g = 1;
+    if (fi > 0.001) g *= clamp(w / fi, 0, 1);
+    if (fo > 0.001) g *= clamp((L - w) / fo, 0, 1);
+    return clamp(g, 0, 1);
+  }
+
   function syncUnlinkedAudio(projectTime: number, play: boolean) {
     if (timeline.audioLinked !== false) {
       pauseAllUnlinkedAudio();
@@ -569,7 +593,8 @@ export default function StudioPage() {
       const el = getOrCreateUnlinkedAudioEl(c.id, asset.videoUrl);
       el.muted = false;
       const vol = clamp(Number.isFinite(c.volume as any) ? (c.volume as any) : 1, 0, 2);
-      el.volume = clamp((vol * trackVol) / 2, 0, 1);
+      const g = fadeGain(c.fadeIn ?? 0, c.fadeOut ?? 0, within, len);
+      el.volume = clamp((vol * trackVol * g) / 2, 0, 1);
       // Keep audio in sync with the timeline playhead.
       if (Number.isFinite(el.currentTime) && Math.abs(el.currentTime - desired) > 0.25) {
         try {
@@ -594,7 +619,7 @@ export default function StudioPage() {
     }
   }
 
-  function applyLinkedClipAudio(clip: ProjectClip | null) {
+  function applyLinkedClipAudio(clip: ProjectClip | null, within: number, len: number) {
     const fg = videoRef.current;
     if (!fg) return;
     if (timeline.audioLinked === false) return; // unlinked is handled by HTMLAudio elements
@@ -606,7 +631,8 @@ export default function StudioPage() {
     const vol = clamp(Number.isFinite(clip?.audioVolume as any) ? (clip?.audioVolume as any) : 1, 0, 2);
     const trackVol = clamp(Number.isFinite(timeline.trackAudioVolume as any) ? (timeline.trackAudioVolume as any) : 1, 0, 2);
     fg.muted = muted;
-    fg.volume = clamp((vol * trackVol) / 2, 0, 1);
+    const g = fadeGain(clip?.audioFadeIn ?? 0, clip?.audioFadeOut ?? 0, within, len);
+    fg.volume = clamp((vol * trackVol * g) / 2, 0, 1);
   }
 
   async function ensurePlayerOnAsset(asset: Asset, seekTo: number, play: boolean) {
@@ -864,7 +890,9 @@ export default function StudioPage() {
         sourceOut: c.sourceOut,
         start,
         volume: 1,
-        muted: false
+        muted: false,
+        fadeIn: c.audioFadeIn ?? 0,
+        fadeOut: c.audioFadeOut ?? 0
       });
     }
 
@@ -917,7 +945,7 @@ export default function StudioPage() {
     };
     setIsPreviewing(true);
     setPlayheadProjectTime(clamp(clipOffset, 0, Math.max(0.001, duration)));
-    applyLinkedClipAudio(clip);
+    applyLinkedClipAudio(clip, 0, Math.max(0.001, clip.sourceOut - clip.sourceIn));
     await ensurePlayerOnAsset(asset, clip.sourceIn, true);
   }
 
@@ -963,9 +991,10 @@ export default function StudioPage() {
         if (selectedClipId) {
           const sel = timeline.clips.find((c) => c.id === selectedClipId);
           if (sel) {
-            applyLinkedClipAudio(sel);
-            const off = offsets.get(sel.id) ?? 0;
             const within = (v.currentTime || 0) - sel.sourceIn;
+            const len = Math.max(0.001, sel.sourceOut - sel.sourceIn);
+            applyLinkedClipAudio(sel, within, len);
+            const off = offsets.get(sel.id) ?? 0;
             setPlayheadProjectTime(clamp(off + Math.max(0, within), 0, Math.max(0.001, duration)));
           } else {
             setPlayheadProjectTime(0);
@@ -981,9 +1010,10 @@ export default function StudioPage() {
         stopPreview();
         return;
       }
-      applyLinkedClipAudio(clip);
-
       const within = (v.currentTime || 0) - clip.sourceIn;
+      const len = Math.max(0.001, clip.sourceOut - clip.sourceIn);
+      applyLinkedClipAudio(clip, within, len);
+
       setPlayheadProjectTime(clamp(state.clipOffset + Math.max(0, within), 0, Math.max(0.001, duration)));
 
       if ((v.currentTime || 0) >= state.stopAtSourceOut - epsilon) {
@@ -1082,7 +1112,7 @@ export default function StudioPage() {
   function updateAudioClipById(
     t: ProjectTimeline,
     clipId: string,
-    patch: Partial<Pick<AudioClip, "sourceIn" | "sourceOut" | "start" | "label" | "volume" | "muted">>
+    patch: Partial<Pick<AudioClip, "sourceIn" | "sourceOut" | "start" | "label" | "volume" | "muted" | "fadeIn" | "fadeOut">>
   ) {
     if (t.audioLinked !== false || !Array.isArray(t.audioClips)) return t;
     const minLen = 0.2;
@@ -1101,7 +1131,11 @@ export default function StudioPage() {
       const volumeRaw = patch.volume != null ? patch.volume : c.volume ?? 1;
       const volume = clamp(Number.isFinite(volumeRaw) ? volumeRaw : 1, 0, 2);
       const muted = patch.muted != null ? Boolean(patch.muted) : Boolean(c.muted);
-      return { ...c, ...patch, sourceIn, sourceOut, start, volume, muted };
+      const fadeInRaw = patch.fadeIn != null ? patch.fadeIn : c.fadeIn ?? 0;
+      const fadeOutRaw = patch.fadeOut != null ? patch.fadeOut : c.fadeOut ?? 0;
+      const fadeIn = clamp(Number.isFinite(fadeInRaw) ? fadeInRaw : 0, 0, Math.max(0, len / 2));
+      const fadeOut = clamp(Number.isFinite(fadeOutRaw) ? fadeOutRaw : 0, 0, Math.max(0, len / 2));
+      return { ...c, ...patch, sourceIn, sourceOut, start, volume, muted, fadeIn, fadeOut };
     });
     return { ...t, audioClips: next };
   }
@@ -1109,14 +1143,19 @@ export default function StudioPage() {
   function updateLinkedClipAudioById(
     t: ProjectTimeline,
     clipId: string,
-    patch: Partial<Pick<ProjectClip, "audioVolume" | "audioMuted">>
+    patch: Partial<Pick<ProjectClip, "audioVolume" | "audioMuted" | "audioFadeIn" | "audioFadeOut">>
   ) {
     const clips = t.clips.map((c) => {
       if (c.id !== clipId) return c;
       const audioVolumeRaw = patch.audioVolume != null ? patch.audioVolume : c.audioVolume ?? 1;
       const audioVolume = clamp(Number.isFinite(audioVolumeRaw) ? audioVolumeRaw : 1, 0, 2);
       const audioMuted = patch.audioMuted != null ? Boolean(patch.audioMuted) : Boolean(c.audioMuted);
-      return { ...c, ...patch, audioVolume, audioMuted };
+      const len = Math.max(0.2, c.sourceOut - c.sourceIn);
+      const audioFadeInRaw = patch.audioFadeIn != null ? patch.audioFadeIn : c.audioFadeIn ?? 0;
+      const audioFadeOutRaw = patch.audioFadeOut != null ? patch.audioFadeOut : c.audioFadeOut ?? 0;
+      const audioFadeIn = clamp(Number.isFinite(audioFadeInRaw) ? audioFadeInRaw : 0, 0, Math.max(0, len / 2));
+      const audioFadeOut = clamp(Number.isFinite(audioFadeOutRaw) ? audioFadeOutRaw : 0, 0, Math.max(0, len / 2));
+      return { ...c, ...patch, audioVolume, audioMuted, audioFadeIn, audioFadeOut };
     });
     return { ...t, clips };
   }
@@ -1668,6 +1707,19 @@ export default function StudioPage() {
               onPatchTrackAudioVolumeLive={(volume) => {
                 setTimeline((t) => sanitizeTimelineIfNeeded({ ...t, trackAudioVolume: volume }));
               }}
+              onPatchAudioFadeLive={(id, patch) => {
+                if (String(id).startsWith("linked-")) {
+                  const clipId = String(id).slice("linked-".length);
+                  setTimeline((t) =>
+                    updateLinkedClipAudioById(t, clipId, {
+                      audioFadeIn: patch.fadeIn,
+                      audioFadeOut: patch.fadeOut
+                    })
+                  );
+                  return;
+                }
+                setTimeline((t) => updateAudioClipById(t, id, patch));
+              }}
               onToggleAudioMute={(id) => {
                 if (String(id).startsWith("linked-")) {
                   const clipId = String(id).slice("linked-".length);
@@ -1756,6 +1808,7 @@ function TimelineStrip({
   onToggleAudioLink,
   onToggleTrackMute,
   onPatchTrackAudioVolumeLive,
+  onPatchAudioFadeLive,
   onToggleAudioMute,
   getHistoryState,
   onCommitHistory,
@@ -1788,6 +1841,7 @@ function TimelineStrip({
   onToggleAudioLink: () => void;
   onToggleTrackMute: () => void;
   onPatchTrackAudioVolumeLive: (volume: number) => void;
+  onPatchAudioFadeLive: (id: string, patch: Partial<Pick<AudioClip, "fadeIn" | "fadeOut">>) => void;
   onToggleAudioMute: (id: string) => void;
   getHistoryState: () => HistoryState;
   onCommitHistory: (prev: HistoryState) => void;
@@ -1816,6 +1870,7 @@ function TimelineStrip({
   const laneAudioRef = useRef<HTMLDivElement | null>(null);
   const audioVolDragRef = useRef<null | { clipId: string; pointerId: number; prev: HistoryState }>(null);
   const trackVolDragRef = useRef<null | { pointerId: number; prev: HistoryState }>(null);
+  const audioFadeDragRef = useRef<null | { clipId: string; side: "in" | "out"; pointerId: number; prev: HistoryState; startFade: number; clipLen: number }>(null);
 
   function clientXToProjectTime(clientX: number) {
     const el = refEl.current;
@@ -1931,6 +1986,12 @@ function TimelineStrip({
     // Top = 200%, bottom = 0%
     const v = (1 - y) * 2;
     return clamp(v, 0, 2);
+  }
+
+  function secsToXPercent(secs: number, clipLen: number) {
+    if (!Number.isFinite(secs) || secs <= 0) return 0;
+    const len = Math.max(0.001, clipLen);
+    return clamp((secs / len) * 100, 0, 48);
   }
 
   return (
@@ -2177,11 +2238,22 @@ function TimelineStrip({
                 const movable = timeline.audioLinked === false && !String(c.id).startsWith("linked-");
                 const isSelected = c.id === selectedAudioClipId;
                 const yPct = volumeToYPercent(c.volume);
+                const fadeIn = clamp(Number.isFinite(c.fadeIn as any) ? (c.fadeIn as any) : 0, 0, len / 2);
+                const fadeOut = clamp(Number.isFinite(c.fadeOut as any) ? (c.fadeOut as any) : 0, 0, len / 2);
+                const fadeInPct = secsToXPercent(fadeIn, len);
+                const fadeOutPct = secsToXPercent(fadeOut, len);
                 return (
                   <div
                     key={c.id}
                     className={`audioClip ${has ? "has" : "none"} ${c.muted ? "isMuted" : ""} ${isSelected ? "isSelected" : ""} ${draggingId === c.id ? "isDragging" : ""}`}
-                    style={{ left: pct(left), width: pct(width), ...(ws ?? {}), ["--volY" as any]: `${yPct.toFixed(2)}%` } as any}
+                    style={{
+                      left: pct(left),
+                      width: pct(width),
+                      ...(ws ?? {}),
+                      ["--volY" as any]: `${yPct.toFixed(2)}%`,
+                      ["--fadeInW" as any]: `${fadeInPct.toFixed(2)}%`,
+                      ["--fadeOutW" as any]: `${fadeOutPct.toFixed(2)}%`
+                    } as any}
                     role="listitem"
                     title={`${c.label} (${fmt(len)})`}
                     draggable={movable}
@@ -2232,6 +2304,90 @@ function TimelineStrip({
                         />
                       </>
                     ) : null}
+                    {/* Fade handles (both linked+unlinked) */}
+                    <div
+                      className="fadeHandle left"
+                      role="slider"
+                      tabIndex={0}
+                      aria-label="Fade in"
+                      aria-valuemin={0}
+                      aria-valuemax={Math.round((len / 2) * 1000) / 1000}
+                      aria-valuenow={Math.round(fadeIn * 1000) / 1000}
+                      title="Fade in (drag)"
+                      onPointerDown={(e) => {
+                        e.stopPropagation();
+                        e.preventDefault();
+                        const prev = getHistoryState();
+                        audioFadeDragRef.current = { clipId: c.id, side: "in", pointerId: e.pointerId, prev, startFade: fadeIn, clipLen: len };
+                        (e.currentTarget as HTMLElement).setPointerCapture?.(e.pointerId);
+                      }}
+                      onPointerMove={(e) => {
+                        const d = audioFadeDragRef.current;
+                        if (!d || d.clipId !== c.id || d.pointerId !== e.pointerId) return;
+                        const parent = (e.currentTarget.parentElement as HTMLElement | null);
+                        if (!parent) return;
+                        const rect = parent.getBoundingClientRect();
+                        const x = clamp((e.clientX - rect.left) / Math.max(1, rect.width), 0, 1);
+                        const next = clamp(x * d.clipLen, 0, d.clipLen / 2);
+                        // route patch to linked/unlinked
+                        onPatchAudioFadeLive(c.id, { fadeIn: next });
+                      }}
+                      onPointerUp={(e) => {
+                        const d = audioFadeDragRef.current;
+                        if (!d || d.clipId !== c.id || d.pointerId !== e.pointerId) return;
+                        audioFadeDragRef.current = null;
+                        try { (e.currentTarget as HTMLElement).releasePointerCapture?.(e.pointerId); } catch {}
+                        onCommitHistory(d.prev);
+                      }}
+                      onPointerCancel={(e) => {
+                        const d = audioFadeDragRef.current;
+                        if (!d || d.clipId !== c.id || d.pointerId !== e.pointerId) return;
+                        audioFadeDragRef.current = null;
+                        try { (e.currentTarget as HTMLElement).releasePointerCapture?.(e.pointerId); } catch {}
+                        onCommitHistory(d.prev);
+                      }}
+                    />
+                    <div
+                      className="fadeHandle right"
+                      role="slider"
+                      tabIndex={0}
+                      aria-label="Fade out"
+                      aria-valuemin={0}
+                      aria-valuemax={Math.round((len / 2) * 1000) / 1000}
+                      aria-valuenow={Math.round(fadeOut * 1000) / 1000}
+                      title="Fade out (drag)"
+                      onPointerDown={(e) => {
+                        e.stopPropagation();
+                        e.preventDefault();
+                        const prev = getHistoryState();
+                        audioFadeDragRef.current = { clipId: c.id, side: "out", pointerId: e.pointerId, prev, startFade: fadeOut, clipLen: len };
+                        (e.currentTarget as HTMLElement).setPointerCapture?.(e.pointerId);
+                      }}
+                      onPointerMove={(e) => {
+                        const d = audioFadeDragRef.current;
+                        if (!d || d.clipId !== c.id || d.pointerId !== e.pointerId) return;
+                        const parent = (e.currentTarget.parentElement as HTMLElement | null);
+                        if (!parent) return;
+                        const rect = parent.getBoundingClientRect();
+                        const x = clamp((e.clientX - rect.left) / Math.max(1, rect.width), 0, 1);
+                        const secs = clamp((1 - x) * d.clipLen, 0, d.clipLen / 2);
+                        onPatchAudioFadeLive(c.id, { fadeOut: secs });
+                      }}
+                      onPointerUp={(e) => {
+                        const d = audioFadeDragRef.current;
+                        if (!d || d.clipId !== c.id || d.pointerId !== e.pointerId) return;
+                        audioFadeDragRef.current = null;
+                        try { (e.currentTarget as HTMLElement).releasePointerCapture?.(e.pointerId); } catch {}
+                        onCommitHistory(d.prev);
+                      }}
+                      onPointerCancel={(e) => {
+                        const d = audioFadeDragRef.current;
+                        if (!d || d.clipId !== c.id || d.pointerId !== e.pointerId) return;
+                        audioFadeDragRef.current = null;
+                        try { (e.currentTarget as HTMLElement).releasePointerCapture?.(e.pointerId); } catch {}
+                        onCommitHistory(d.prev);
+                      }}
+                    />
                     <div className="audioVolLine" aria-hidden="true" />
                     <div
                       className="audioVolHit"

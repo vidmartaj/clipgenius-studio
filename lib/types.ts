@@ -25,6 +25,8 @@ export type ProjectClip = {
   // Audio controls for linked audio mode (gain multiplier; 1 = 100%).
   audioVolume?: number;
   audioMuted?: boolean;
+  audioFadeIn?: number; // seconds
+  audioFadeOut?: number; // seconds
 };
 
 export type AudioClip = {
@@ -38,6 +40,8 @@ export type AudioClip = {
   // Linear gain multiplier. 1 = 100%.
   volume?: number;
   muted?: boolean;
+  fadeIn?: number; // seconds
+  fadeOut?: number; // seconds
 };
 
 export type ProjectTimeline = {

@@ -725,6 +725,34 @@ body {
   filter: saturate(0.7);
 }
 
+.audioClip::before{
+  content:"";
+  position:absolute;
+  inset: 0;
+  background:
+    linear-gradient(90deg, rgba(93,214,255,0.20) 0%, rgba(93,214,255,0.00) 60%) left / var(--fadeInW, 0%) 100% no-repeat,
+    linear-gradient(270deg, rgba(155,123,255,0.18) 0%, rgba(155,123,255,0.00) 60%) right / var(--fadeOutW, 0%) 100% no-repeat;
+  pointer-events:none;
+  opacity: 0.9;
+}
+
+.fadeHandle{
+  position: absolute;
+  bottom: 6px;
+  width: 14px;
+  height: 14px;
+  border-radius: 5px;
+  border: 1px solid rgba(255,255,255,0.16);
+  background: rgba(0,0,0,0.18);
+  cursor: ew-resize;
+}
+.fadeHandle.left{ left: 6px; }
+.fadeHandle.right{ right: 6px; }
+.fadeHandle:focus-visible{
+  outline: 2px solid rgba(93,214,255,0.55);
+  outline-offset: 2px;
+}
+
 .audioVolLine{
   position: absolute;
   left: 10px;
