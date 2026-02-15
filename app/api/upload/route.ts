@@ -60,7 +60,27 @@ export async function POST(req: Request) {
       // Keep going — we can still build a usable fallback timeline.
       sceneTimes = [];
     }
-    const clips = buildClipsFromCuts(durationSeconds, sceneTimes, { minClipSeconds: 2, maxClips: 12 });
+    let clips = buildClipsFromCuts(durationSeconds, sceneTimes, { minClipSeconds: 2, maxClips: 12 });
+
+    // If we have audio, detect non-silent regions and mark those clips as "highlight".
+    // This makes "Focus on action scenes" / "highlights only" drafts much more reliable
+    // even when visual scene-cut detection is noisy.
+    if (hasAudio) {
+      try {
+        const silences = await detectSilences(analyzePath, { thresholdDb: -35, minSilenceSeconds: 0.35, timeoutMs: 120_000 });
+        const nonSilent = invertIntervals({ start: 0, end: durationSeconds }, silences).filter((s) => s.end - s.start >= 0.6);
+        clips = clips.map((c, idx) => {
+          // Keep intro/outro as source for story structure.
+          if (idx === 0 || idx === clips.length - 1) return { ...c, kind: "source" };
+          const len = Math.max(0.001, c.end - c.start);
+          const nonSilentOverlap = overlapSeconds({ start: c.start, end: c.end }, nonSilent);
+          const frac = nonSilentOverlap / len;
+          return { ...c, kind: frac >= 0.6 ? ("highlight" as const) : ("source" as const) };
+        });
+      } catch {
+        // Non-fatal.
+      }
+    }
     const analysis: AnalysisTimeline = { assetId, durationSeconds, clips };
 
     // Generate a waveform image for the audio lane (optional).
@@ -293,7 +313,10 @@ function buildClipsFromCuts(
     clips.push({
       id: crypto.randomUUID(),
       label: `Scene ${i + 1}`,
-      kind: "source",
+      // We refine this later using audio non-silence detection (if available),
+      // but defaulting mid scenes to highlights makes the editor feel "smart"
+      // even when silence detection isn't available.
+      kind: "highlight",
       start,
       end
     });
@@ -340,8 +363,8 @@ function buildClipsFromCuts(
 
   // Friendlier labels for the first/last clip.
   if (clips.length >= 2) {
-    clips[0] = { ...clips[0], label: "Intro" };
-    clips[clips.length - 1] = { ...clips[clips.length - 1], label: "Outro" };
+    clips[0] = { ...clips[0], label: "Intro", kind: "source" };
+    clips[clips.length - 1] = { ...clips[clips.length - 1], label: "Outro", kind: "source" };
   }
 
   // If scene detection didn't find useful cuts (common for some MOVs),
@@ -369,4 +392,94 @@ function buildClipsFromCuts(
   }
 
   return clips;
+}
+
+type Interval = { start: number; end: number };
+
+async function detectSilences(
+  filePath: string,
+  opts: { thresholdDb: number; minSilenceSeconds: number; timeoutMs: number }
+): Promise<Interval[]> {
+  const thr = Number(opts.thresholdDb);
+  const d = Number(opts.minSilenceSeconds);
+  const { stderr } = await run(
+    "ffmpeg",
+    ["-hide_banner", "-i", filePath, "-af", `silencedetect=n=${thr}dB:d=${d}`, "-f", "null", "-"],
+    { timeoutMs: opts.timeoutMs }
+  );
+
+  const silences: Interval[] = [];
+  const reStart = /silence_start:\s*([0-9.]+)/g;
+  const reEnd = /silence_end:\s*([0-9.]+)/g;
+
+  const starts: number[] = [];
+  const ends: number[] = [];
+  let m: RegExpExecArray | null;
+  while ((m = reStart.exec(stderr))) {
+    const t = Number(m[1]);
+    if (Number.isFinite(t)) starts.push(t);
+  }
+  while ((m = reEnd.exec(stderr))) {
+    const t = Number(m[1]);
+    if (Number.isFinite(t)) ends.push(t);
+  }
+
+  // Pair starts/ends in order. If an end is missing (silence runs to EOF), we drop it here;
+  // the caller can clamp with the known duration by complementing intervals.
+  const n = Math.min(starts.length, ends.length);
+  for (let i = 0; i < n; i++) {
+    const s = starts[i];
+    const e = ends[i];
+    if (!Number.isFinite(s) || !Number.isFinite(e)) continue;
+    if (!(e > s)) continue;
+    silences.push({ start: s, end: e });
+  }
+
+  silences.sort((a, b) => a.start - b.start);
+  return mergeIntervals(silences, 0.05);
+}
+
+function mergeIntervals(list: Interval[], pad: number) {
+  const out: Interval[] = [];
+  for (const it of list) {
+    const s = it.start - pad;
+    const e = it.end + pad;
+    if (out.length === 0) {
+      out.push({ start: s, end: e });
+      continue;
+    }
+    const prev = out[out.length - 1];
+    if (s <= prev.end) prev.end = Math.max(prev.end, e);
+    else out.push({ start: s, end: e });
+  }
+  return out;
+}
+
+function invertIntervals(domain: Interval, silences: Interval[]): Interval[] {
+  const out: Interval[] = [];
+  const a = domain.start;
+  const b = domain.end;
+  let cur = a;
+  for (const s of silences) {
+    const ss = clamp(s.start, a, b);
+    const ee = clamp(s.end, a, b);
+    if (ss > cur) out.push({ start: cur, end: ss });
+    cur = Math.max(cur, ee);
+  }
+  if (cur < b) out.push({ start: cur, end: b });
+  return out.filter((x) => x.end > x.start);
+}
+
+function overlapSeconds(interval: Interval, list: Interval[]) {
+  let sum = 0;
+  for (const it of list) {
+    const s = Math.max(interval.start, it.start);
+    const e = Math.min(interval.end, it.end);
+    if (e > s) sum += e - s;
+  }
+  return sum;
+}
+
+function clamp(n: number, a: number, b: number) {
+  return Math.max(a, Math.min(b, n));
 }

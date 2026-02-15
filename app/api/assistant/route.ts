@@ -21,6 +21,40 @@ export async function POST(req: Request) {
   const style = parseStyle(message);
   const highlightsOnly = message.includes("action") || message.includes("highlights only") || message.includes("best moments");
 
+  if (
+    message.includes("remove dead space") ||
+    message.includes("remove deadspace") ||
+    message.includes("remove silence") ||
+    message.includes("cut silence") ||
+    message.includes("cut pauses") ||
+    message.includes("remove pauses")
+  ) {
+    const sec = targetSeconds ?? 60;
+    reply.reply =
+      `Done — I removed dead space and rebuilt a tighter cut (~${fmt(sec)}). ` +
+      "Want it even tighter (more jump-cuts) or smoother (longer shots)?";
+    if (hasClips) {
+      reply.operations = [
+        { op: "auto_edit", targetSeconds: sec, style: style ?? "fast", highlightsOnly: true },
+        { op: "set_clip_length_profile", minSeconds: 0.8, maxSeconds: 2.8, avgSeconds: 1.6 },
+        { op: "set_audio_fades", fadeInSeconds: 0.08, fadeOutSeconds: 0.08 }
+      ];
+    } else {
+      reply.operations = [
+        { op: "auto_edit", targetSeconds: sec, style: style ?? "fast", highlightsOnly: true },
+        { op: "set_audio_fades", fadeInSeconds: 0.08, fadeOutSeconds: 0.08 }
+      ];
+    }
+    return NextResponse.json(reply);
+  }
+
+  if (message.includes("make it longer") || message.includes("longer")) {
+    const sec = targetSeconds ?? 120;
+    reply.reply = `Got it — I’ll keep more context and extend the cut to ~${fmt(sec)}.`;
+    reply.operations = [{ op: "auto_edit", targetSeconds: sec, style: style ?? "story", highlightsOnly }];
+    return NextResponse.json(reply);
+  }
+
   if (message.includes("focus on action") || message.includes("action scenes")) {
     const sec = targetSeconds ?? 60;
     reply.reply = `Done — I rebuilt the cut to prioritize action moments and key highlights (~${fmt(sec)}).`;
